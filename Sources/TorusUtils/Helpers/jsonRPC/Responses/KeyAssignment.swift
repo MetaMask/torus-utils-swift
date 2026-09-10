@@ -12,6 +12,8 @@ internal struct KeyAssignment: Codable {
     struct PublicKey: Hashable, Codable {
         let X: String
         let Y: String
+        let SignerX: String?
+        let SignerY: String?
     }
 
     enum CodingKeys: CodingKey {

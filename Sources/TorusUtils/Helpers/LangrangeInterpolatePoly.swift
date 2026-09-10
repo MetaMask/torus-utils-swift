@@ -84,7 +84,11 @@ internal class Lagrange {
         return lagrange(unsortedPoints: points)
     }
 
-    public static func lagrangeInterpolation(shares: [String], nodeIndex: [Int]) throws -> String {
+    public static func lagrangeInterpolation(
+        shares: [String],
+        nodeIndex: [Int],
+        order: BigInt = KeyUtils.getOrderOfCurve()
+    ) throws -> String {
         let sharesList: [BigInt] = shares.map({ BigInt($0.addLeading0sForLength64(), radix: 16) }).filter({ $0 != nil }).map({ $0! })
         let indexList: [BigInt] = nodeIndex.map({ BigInt($0) })
 
@@ -102,21 +106,21 @@ internal class Lagrange {
                 if i != j {
                     let negatedJ = indexList[j] * BigInt(-1)
                     upper = upper * negatedJ
-                    upper = upper.modulus(KeyUtils.getOrderOfCurve())
+                    upper = upper.modulus(order)
 
                     var temp = indexList[i] - indexList[j]
-                    temp = temp.modulus(KeyUtils.getOrderOfCurve())
-                    lower = (lower * temp).modulus(KeyUtils.getOrderOfCurve())
+                    temp = temp.modulus(order)
+                    lower = (lower * temp).modulus(order)
                 }
             }
             guard
-                let inv = lower.inverse(KeyUtils.getOrderOfCurve())
+                let inv = lower.inverse(order)
             else {
                 throw TorusUtilError.decryptionFailed
             }
-            var delta = (upper * inv).modulus(KeyUtils.getOrderOfCurve())
-            delta = (delta * sharesList[i]).modulus(KeyUtils.getOrderOfCurve())
-            secret = BigUInt((BigInt(secret) + delta).modulus(KeyUtils.getOrderOfCurve()))
+            var delta = (upper * inv).modulus(order)
+            delta = (delta * sharesList[i]).modulus(order)
+            secret = BigUInt((BigInt(secret) + delta).modulus(order))
             sharesDecrypt += 1
         }
 

@@ -11,17 +11,19 @@ var utilsLogType = OSLogType.default
 public class TorusUtils {
     private var sessionTime: Int = 86400 // 24 hour
 
-    var allowHost: String
-
     var serverTimeOffset: Int?
 
     var network: Web3AuthNetwork
 
     var clientId: String
 
-    var enableOneKey: Bool
+    var buildEnv: BuildEnv
 
-    var signerHost: String
+    var source: String?
+
+    var keyType: TorusKeyType
+
+    var enableOneKey: Bool
 
     var legacyMetadataHost: String
 
@@ -37,21 +39,32 @@ public class TorusUtils {
     ///
     /// - Throws: `TorusUtilError.invalidInput`
     public init(params: TorusOptions, loglevel: OSLogType = .default) throws {
-        var defaultHost = ""
-        if params.legacyMetadataHost == nil {
-            defaultHost = try params.network.metadataMap
-        } else {
-            defaultHost = params.legacyMetadataHost!
+        if params.keyType == .ed25519, params.network.isLegacy {
+            throw TorusUtilError.runtime("keyType: ed25519 is not supported by \(params.network.name) network")
         }
 
+        let defaultHost: String
+        if let configuredHost = params.legacyMetadataHost {
+            defaultHost = configuredHost
+        } else if params.network.isLegacy {
+            guard let metadataHost = LEGACY_METADATA_MAP[params.buildEnv] else {
+                throw TorusUtilError.configurationError
+            }
+            defaultHost = metadataHost
+        } else {
+            defaultHost = params.network == .SAPPHIRE_MAINNET
+                ? "https://node-1.node.web3auth.io/metadata"
+                : "https://node-1.dev-node.web3auth.io/metadata"
+        }
         serverTimeOffset = params.serverTimeOffset
         network = params.network
         clientId = params.clientId
-        allowHost = params.network.signerMap + "/api/allow"
+        buildEnv = params.buildEnv
+        source = params.source
+        keyType = params.keyType
         utilsLogType = loglevel
         enableOneKey = params.enableOneKey
         legacyMetadataHost = defaultHost
-        signerHost = params.network.signerMap + "/api/sign"
     }
 
     internal static func isLegacyNetworkRouteMap(network: Web3AuthNetwork) -> Bool {
@@ -89,10 +102,7 @@ public class TorusUtils {
     ///
     /// - Returns: `String`
     public static func getPostboxKey(torusKey: TorusKey) -> String {
-        if torusKey.metadata.typeOfUser == .v1 {
-            return torusKey.finalKeyData.privKey
-        }
-        return torusKey.oAuthKeyData.privKey
+        torusKey.postboxKeyData.privKey
     }
 
     /// Login for the provided user
@@ -107,6 +117,99 @@ public class TorusUtils {
     /// - Returns: `TorusKey`
     ///
     /// - Throws: `TorusUtilError`
+    public func retrieveShares(params: RetrieveSharesParams) async throws -> TorusKey {
+        guard !params.endpoints.isEmpty else {
+            throw TorusUtilError.runtime("endpoints param is required")
+        }
+        guard !params.nodePubKeys.isEmpty else {
+            throw TorusUtilError.runtime("nodePubKeys param is required")
+        }
+        guard params.nodePubKeys.count == params.indexes.count else {
+            throw TorusUtilError.runtime("nodePubKeys length must be same as indexes length")
+        }
+        guard params.nodePubKeys.count == params.endpoints.count else {
+            throw TorusUtilError.runtime("nodePubKeys length must be same as endpoints length")
+        }
+
+        let shouldUseDkg: Bool
+        if let requestedUseDkg = params.useDkg {
+            if !requestedUseDkg, network.isLegacy {
+                throw TorusUtilError.runtime("useDkg cannot be false for legacy network; \(network.name)")
+            }
+            shouldUseDkg = keyType == .ed25519 ? false : requestedUseDkg
+        } else {
+            shouldUseDkg = keyType == .secp256k1
+        }
+
+        if params.extraParams.session_token_exp_second == nil {
+            params.extraParams.session_token_exp_second = sessionTime
+        }
+
+        let callerSuppliedRecordId = !(params.recordId?.isEmpty ?? true)
+        let recordId = callerSuppliedRecordId ? params.recordId! : CitadelUtils.generateRecordId()
+
+        do {
+            let result = try await NodeUtils.retrieveOrImportShare(
+                legacyMetadataHost: legacyMetadataHost,
+                serverTimeOffset: serverTimeOffset,
+                enableOneKey: enableOneKey,
+                network: network,
+                clientId: clientId,
+                buildEnv: buildEnv,
+                endpoints: params.endpoints,
+                indexes: params.indexes,
+                nodePubKeys: params.nodePubKeys,
+                verifier: params.verifier,
+                verifierParams: params.verifierParams,
+                idToken: params.idToken,
+                importedShares: [],
+                newPrivateKey: nil,
+                extraParams: params.extraParams,
+                keyType: keyType,
+                useDkg: shouldUseDkg,
+                checkCommitment: params.checkCommitment,
+                recordId: recordId,
+                source: source
+            )
+
+            if callerSuppliedRecordId {
+                reportUserAuthFlowAudit(
+                    params: params,
+                    recordId: recordId,
+                    authFlowAuditParams: CitadelAuthFlowAuditParams(oauthVerified: true, oauthCompleted: true)
+                )
+            } else {
+                reportSignerAllow(params: makeAllowParams(
+                    verifier: params.verifier,
+                    verifierId: params.verifierParams.verifier_id,
+                    recordId: recordId,
+                    oauthVerified: .set
+                ))
+            }
+            return result
+        } catch {
+            if callerSuppliedRecordId {
+                reportUserAuthFlowAudit(
+                    params: params,
+                    recordId: recordId,
+                    authFlowAuditParams: CitadelAuthFlowAuditParams(
+                        oauthCompleted: true,
+                        oauthVerificationFailed: true
+                    )
+                )
+            } else {
+                reportSignerAllow(params: makeAllowParams(
+                    verifier: params.verifier,
+                    verifierId: params.verifierParams.verifier_id,
+                    recordId: recordId,
+                    oauthVerificationFailed: .set
+                ))
+            }
+            throw error
+        }
+    }
+
+    @available(*, deprecated, message: "Use retrieveShares(params:) with indexes and nodePubKeys")
     public func retrieveShares(
         endpoints: [String],
         verifier: String,
@@ -117,8 +220,28 @@ public class TorusUtils {
         if extraParams.session_token_exp_second == nil {
             extraParams.session_token_exp_second = sessionTime
         }
-
-        return try await NodeUtils.retrieveOrImportShare(legacyMetadataHost: legacyMetadataHost, serverTimeOffset: serverTimeOffset, enableOneKey: enableOneKey, allowHost: allowHost, network: network, clientId: clientId, endpoints: endpoints, verifier: verifier, verifierParams: verifierParams, idToken: idToken, importedShares: [], apiKey: apiKey, newPrivateKey: nil, extraParams: extraParams)
+        return try await NodeUtils.retrieveOrImportShare(
+            legacyMetadataHost: legacyMetadataHost,
+            serverTimeOffset: serverTimeOffset,
+            enableOneKey: enableOneKey,
+            network: network,
+            clientId: clientId,
+            buildEnv: buildEnv,
+            endpoints: endpoints,
+            indexes: [],
+            nodePubKeys: [],
+            verifier: verifier,
+            verifierParams: verifierParams,
+            idToken: idToken,
+            importedShares: [],
+            newPrivateKey: nil,
+            extraParams: extraParams,
+            keyType: keyType,
+            useDkg: true,
+            checkCommitment: true,
+            recordId: CitadelUtils.generateRecordId(),
+            source: source
+        )
     }
 
     /// Retrieves user information, defaulting the user type to .v2
@@ -151,6 +274,56 @@ public class TorusUtils {
     /// - Returns: `TorusKey`
     ///
     /// - Throws: `TorusUtilError`
+    public func importPrivateKey(params: ImportPrivateKeyParams) async throws -> TorusKey {
+        if network.isLegacy {
+            throw TorusUtilError.legacyImportUnsupported(network.name)
+        }
+
+        let nodePubs = TorusNodePubModelToINodePub(nodes: params.nodePubKeys)
+        if params.endpoints.count != params.nodeIndexes.count {
+            throw TorusUtilError.runtime("Length of endpoints must be the same as length of nodeIndexes")
+        }
+        if params.endpoints.count != params.nodePubKeys.count {
+            throw TorusUtilError.runtime("Length of endpoints must be the same as length of nodePubKeys")
+        }
+
+        let sharesData = try KeyUtils.generateShares(
+            keyType: keyType,
+            serverTimeOffset: serverTimeOffset ?? 0,
+            nodeIndexes: params.nodeIndexes,
+            nodePubKeys: nodePubs,
+            privateKey: params.newPrivateKey
+        )
+
+        if params.extraParams.session_token_exp_second == nil {
+            params.extraParams.session_token_exp_second = sessionTime
+        }
+
+        return try await NodeUtils.retrieveOrImportShare(
+            legacyMetadataHost: legacyMetadataHost,
+            serverTimeOffset: serverTimeOffset ?? 0,
+            enableOneKey: enableOneKey,
+            network: network,
+            clientId: clientId,
+            buildEnv: buildEnv,
+            endpoints: params.endpoints,
+            indexes: params.nodeIndexes,
+            nodePubKeys: params.nodePubKeys,
+            verifier: params.verifier,
+            verifierParams: params.verifierParams,
+            idToken: params.idToken,
+            importedShares: sharesData,
+            newPrivateKey: params.newPrivateKey,
+            extraParams: params.extraParams,
+            keyType: keyType,
+            useDkg: false,
+            checkCommitment: params.checkCommitment,
+            recordId: params.recordId ?? CitadelUtils.generateRecordId(),
+            source: source
+        )
+    }
+
+    @available(*, deprecated, message: "Use importPrivateKey(params:)")
     public func importPrivateKey(
         endpoints: [String],
         nodeIndexes: [BigUInt],
@@ -161,22 +334,78 @@ public class TorusUtils {
         newPrivateKey: String,
         extraParams: TorusUtilsExtraParams = TorusUtilsExtraParams()
     ) async throws -> TorusKey {
-        if network.isLegacy {
-            throw TorusUtilError.legacyImportUnsupported(network.name)
-        }
-            
-        let nodePubs = TorusNodePubModelToINodePub(nodes: nodePubKeys)
-        if endpoints.count != nodeIndexes.count {
-            throw TorusUtilError.runtime("Length of endpoints must be the same as length of nodeIndexes")
-        }
+        try await importPrivateKey(params: ImportPrivateKeyParams(
+            endpoints: endpoints,
+            nodeIndexes: nodeIndexes,
+            nodePubKeys: nodePubKeys,
+            verifier: verifier,
+            verifierParams: verifierParams,
+            idToken: idToken,
+            newPrivateKey: newPrivateKey,
+            extraParams: extraParams
+        ))
+    }
 
-        let sharesData = try KeyUtils.generateShares(serverTimeOffset: serverTimeOffset ?? 0, nodeIndexes: nodeIndexes, nodePubKeys: nodePubs, privateKey: newPrivateKey)
-
-        if extraParams.session_token_exp_second == nil {
-            extraParams.session_token_exp_second = sessionTime
+    public func reportSignerAllow(params: CitadelAllowParams) {
+        Task {
+            do {
+                try await CitadelUtils.callAllowApi(params: params)
+            } catch {
+                os_log(
+                    "Failed to log Citadel allow API: %{public}@",
+                    log: getTorusLogger(log: TorusUtilsLogger.network, type: .error),
+                    type: .error,
+                    String(describing: error)
+                )
+            }
         }
-        
-        return try await NodeUtils.retrieveOrImportShare(legacyMetadataHost: legacyMetadataHost, serverTimeOffset: serverTimeOffset ?? 0, enableOneKey: enableOneKey, allowHost: allowHost, network: network, clientId: clientId, endpoints: endpoints, verifier: verifier, verifierParams: verifierParams, idToken: idToken, importedShares: sharesData, newPrivateKey: newPrivateKey, extraParams: extraParams)
+    }
+
+    public func reportUserAuthFlowAudit(
+        params: RetrieveSharesParams,
+        recordId: String? = nil,
+        authFlowAuditParams: CitadelAuthFlowAuditParams
+    ) {
+        let auditParams = CitadelUtils.buildAuditPayload(
+            network: network,
+            clientId: clientId,
+            params: params,
+            recordId: recordId,
+            authFlowAuditParams: authFlowAuditParams
+        )
+        let environment = buildEnv
+        Task {
+            do {
+                try await CitadelUtils.callAuditApi(buildEnv: environment, params: auditParams)
+            } catch {
+                os_log(
+                    "Failed to log Citadel auth audit API: %{public}@",
+                    log: getTorusLogger(log: TorusUtilsLogger.network, type: .error),
+                    type: .error,
+                    String(describing: error)
+                )
+            }
+        }
+    }
+
+    private func makeAllowParams(
+        verifier: String,
+        verifierId: String,
+        recordId: String,
+        oauthVerificationFailed: CitadelAllowParamsSetOrUnsetFlag? = nil,
+        oauthVerified: CitadelAllowParamsSetOrUnsetFlag? = nil
+    ) -> CitadelAllowParams {
+        CitadelAllowParams(
+            buildEnv: buildEnv,
+            verifier: verifier,
+            verifierId: verifierId,
+            network: network.name,
+            clientId: clientId,
+            recordId: recordId,
+            source: source,
+            oauthVerified: oauthVerified,
+            oauthVerificationFailed: oauthVerificationFailed
+        )
     }
 
     /// Retrieves user information
@@ -200,7 +429,16 @@ public class TorusUtils {
     }
 
     private func getNewPublicAddress(endpoints: [String], verifier: String, verifierId: String, extendedVerifierId: String? = nil, enableOneKey: Bool) async throws -> TorusPublicKey {
-        let keyAssignResult = try await NodeUtils.getPubKeyOrKeyAssign(endpoints: endpoints, network: network, verifier: verifier, verifierId: verifierId, legacyMetadataHost: legacyMetadataHost, serverTimeOffset: serverTimeOffset, extendedVerifierId: extendedVerifierId)
+        let keyAssignResult = try await NodeUtils.getPubKeyOrKeyAssign(
+            endpoints: endpoints,
+            network: network,
+            verifier: verifier,
+            verifierId: verifierId,
+            legacyMetadataHost: legacyMetadataHost,
+            serverTimeOffset: serverTimeOffset,
+            extendedVerifierId: extendedVerifierId,
+            keyType: keyType
+        )
 
         if keyAssignResult.errorResult != nil {
             let error = keyAssignResult.errorResult!.message
@@ -239,13 +477,22 @@ public class TorusUtils {
             let legacyResult = LegacyVerifierLookupResponse(keys: legacyKeysResult, serverTimeOffset: String(finalServerTimeOffset))
             return try await formatLegacyPublicKeyData(finalKeyResult: legacyResult, enableOneKey: enableOneKey, isNewKey: keyAssignResult.keyResult!.is_new_key, serverTimeOffset: finalServerTimeOffset)
         } else {
-            let (X, Y) = try KeyUtils.getPublicKeyCoords(pubKey: pubKey)
+            let X = keyAssignResult.keyResult!.keys[0].pub_key_X
+            let Y = keyAssignResult.keyResult!.keys[0].pub_key_Y
+            let oAuthPoint = try Point(x: X, y: Y)
             oAuthPubKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: X, pubKeyY: Y)
             finalPubKey = oAuthPubKey!
             if keyAssignResult.nonceResult!.pubNonce != nil && !(keyAssignResult.nonceResult!.pubNonce!.x.isEmpty || keyAssignResult.nonceResult!.pubNonce!.y.isEmpty) {
                 let pubNonceResult = keyAssignResult.nonceResult!.pubNonce!
-                let pubNonceKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: pubNonceResult.x, pubKeyY: pubNonceResult.y)
-                finalPubKey = try KeyUtils.combinePublicKeys(keys: [oAuthPubKey!, pubNonceKey])
+                let combined = try KeyUtils.combinePublicPoints(
+                    keyType: keyType,
+                    first: oAuthPoint,
+                    second: try Point(x: pubNonceResult.x, y: pubNonceResult.y)
+                )
+                finalPubKey = KeyUtils.getPublicKeyFromCoords(
+                    pubKeyX: String(combined.x, radix: 16),
+                    pubKeyY: String(combined.y, radix: 16)
+                )
                 pubNonce = pubNonceResult
             } else {
                 throw TorusUtilError.pubNonceMissing
@@ -257,10 +504,10 @@ public class TorusUtils {
         }
 
         let (oAuthPubKeyX, oAuthPubKeyY) = try KeyUtils.getPublicKeyCoords(pubKey: oAuthPubKey!)
-        let oAuthAddress = try KeyUtils.generateAddressFromPubKey(publicKeyX: oAuthPubKeyX, publicKeyY: oAuthPubKeyY)
+        let oAuthAddress = try KeyUtils.generateAddressFromPubKey(keyType: keyType, publicKeyX: oAuthPubKeyX, publicKeyY: oAuthPubKeyY)
 
         let (finalPubKeyX, finalPubKeyY) = try KeyUtils.getPublicKeyCoords(pubKey: finalPubKey!)
-        let finalAddress = try KeyUtils.generateAddressFromPubKey(publicKeyX: finalPubKeyX, publicKeyY: finalPubKeyY)
+        let finalAddress = try KeyUtils.generateAddressFromPubKey(keyType: keyType, publicKeyX: finalPubKeyX, publicKeyY: finalPubKeyY)
 
         return TorusPublicKey(
             oAuthKeyData: TorusPublicKey.OAuthKeyData(

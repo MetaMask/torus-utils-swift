@@ -14,7 +14,7 @@ You can install the TorusUtils using Swift Package Manager:
 ...
 dependencies: [
     ...
-    .package(url: "https://github.com/torusresearch/torus-utils-swift", from: "10.0.0")
+    .package(url: "https://github.com/torusresearch/torus-utils-swift", from: "11.0.0")
 ],
 targets: [
     .target( name: "<INSERT_TARGET_NAME>",
@@ -30,7 +30,7 @@ Or CocoaPods:
 
 ```
 ...
-    pod 'Torus-utils', '~> 10.0.0'
+    pod 'Torus-utils', '~> 11.0.0'
 ...
 ```
 
@@ -38,7 +38,14 @@ Or CocoaPods:
 Initialize the `TorusUtils` class by passing `TorusOptions` as params. Params includes `TorusNetwork`, `enableOneKey`, and your `clientId`. `enableOneKey` if true, adds the nonce value to the key, to make it compatible with v2 users. The package supports both legacy and sapphire networks.  
 
 ```swift
-   let torusUtils = TorusUtils(params: TorusOptions(clientId: "YOUR_CLIENT_ID", network: .SAPPHIRE_MAINNET, enableOneKey: true))
+let torusUtils = try TorusUtils(params: TorusOptions(
+    clientId: "YOUR_CLIENT_ID",
+    network: .SAPPHIRE_MAINNET,
+    buildEnv: .production,
+    enableOneKey: true,
+    source: "my-ios-app",
+    keyType: .secp256k1
+))
 ```
 
 
@@ -71,13 +78,40 @@ do {
  
  let verifierParams = VerifierParams(verifier_id: verifierID)
          
- let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), indexes: nodeDetails.getTorusIndexes(), verifier: verifier, verifierParams: verifierParams, idToken: token)
+ let data = try await torus.retrieveShares(params: RetrieveSharesParams(
+    endpoints: nodeDetails.getTorusNodeSSSEndpoints(),
+    indexes: nodeDetails.getTorusIndexes(),
+    nodePubKeys: nodeDetails.getTorusNodePub(),
+    verifier: verifier,
+    verifierParams: verifierParams,
+    idToken: token
+ ))
 
  let evmAddress = data.finalKeyData!.evmAddress
 } catch let error {
     // Handle error
 }
 ```
+
+## Migrating from 10.x to 11.0
+
+Version 11 aligns the Swift SDK with `@toruslabs/torus.js` 17.2.3 and is a
+breaking release:
+
+- `TorusOptions` now accepts `buildEnv`, `source`, and `keyType`. Defaults are
+  `.production`, `nil`, and `.secp256k1`.
+- `retrieveShares` takes `RetrieveSharesParams`, including node indexes/public
+  keys, `recordId`, `authConnection`, `useDkg`, and `checkCommitment`.
+- `importPrivateKey` takes `ImportPrivateKeyParams`, including `recordId` and
+  `checkCommitment`. Positional overloads remain temporarily deprecated.
+- Signer allow requests now use Citadel query parameters. The legacy
+  `signerMap`, `/api/allow`, `x-api-key`, and custom gating headers are removed.
+- Legacy metadata hosts are selected from `LEGACY_METADATA_MAP[buildEnv]`.
+- `.ed25519` is supported on Sapphire networks and rejected on legacy networks.
+  Ed25519 defaults to locally generated/imported shares (`useDkg == false`);
+  secp256k1 defaults to DKG.
+- The minimum supported versions remain iOS 13 for CocoaPods, iOS 14 for SPM,
+  and macOS 10.15 for SPM.
 
 ## Requirements
 - iOS 13 or above is required 

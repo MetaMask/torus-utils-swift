@@ -13,6 +13,7 @@ internal struct ShareRequestParams: Codable {
         public var signing_pub_key_y: String?
         public var encrypted_share: String?
         public var encrypted_share_metadata: EciesHexOmitCiphertext?
+        public var encrypted_seed: String? = nil
         public var node_index: Int?
         public var key_type: TorusKeyType?
         public var nonce_data: String?
@@ -42,4 +43,8 @@ internal struct ShareRequestParams: Codable {
     public var distributed_metadata: Bool = true
     public var one_key_flow: Bool = true
     public var client_time: String
+    public var verifieridentifier: String? = nil
+    public var temppubx: String? = nil
+    public var temppuby: String? = nil
+    public var key_type: TorusKeyType? = nil
 }
