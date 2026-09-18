@@ -1,31 +1,34 @@
 PODS:
   - BigInt (5.2.0)
   - curvelib.swift (2.0.0)
-  - Torus-fetchNodeDetails (8.0.1):
+  - Torus-fetchNodeDetails (9.0.1):
     - BigInt (~> 5.2.0)
-  - Torus-utils (10.0.0):
+  - Torus-utils (11.0.0):
     - curvelib.swift (~> 2.0.0)
-    - Torus-fetchNodeDetails (~> 8.0.1)
+    - Torus-fetchNodeDetails (~> 9.0)
 
 DEPENDENCIES:
+  - Torus-fetchNodeDetails (from `./Torus-fetchNodeDetails.podspec`)
   - Torus-utils (from `../`)
 
 SPEC REPOS:
   https://github.com/CocoaPods/Specs.git:
-    - BigInt
     - curvelib.swift
-    - Torus-fetchNodeDetails
+  trunk:
+    - BigInt
 
 EXTERNAL SOURCES:
+  Torus-fetchNodeDetails:
+    :podspec: "./Torus-fetchNodeDetails.podspec"
   Torus-utils:
     :path: "../"
 
 SPEC CHECKSUMS:
   BigInt: f668a80089607f521586bbe29513d708491ef2f7
   curvelib.swift: b9223e5cac801effed8a5fe8968e952b3fe427a5
-  Torus-fetchNodeDetails: 2a5fbb222ec28af4128d64e4c2d520c7db456b78
-  Torus-utils: 4a1db3d9c1aa221df312ffa7ec154e7e4719850a
+  Torus-fetchNodeDetails: 5fab68292f2fdaa6b66b4789bb828b510f108654
+  Torus-utils: 2bddea7288db4d6799713c80f599f788056b3887
 
-PODFILE CHECKSUM: 2d35466879f2d32f53c6ccbca958796c381f0e62
+PODFILE CHECKSUM: 1d250f748ae0bb16e1587f790f12250f020c35b4
 
-COCOAPODS: 1.15.2
+COCOAPODS: 1.16.2

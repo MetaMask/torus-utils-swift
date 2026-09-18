@@ -24,6 +24,53 @@ final class SapphireDevnetTest: XCTestCase {
         torus = try! TorusUtils(params: TorusOptions(clientId: "YOUR_CLIENT_ID", network: .SAPPHIRE_DEVNET))
     }
 
+    func test_should_fetch_ed25519_public_address() async throws {
+        let verifierID = "Willa_Funk11@gmail.com"
+        let nodeDetails = try await fnd.getNodeDetails(verifier: TORUS_TEST_VERIFIER, verifierID: verifierID)
+        let ed25519Torus = try TorusUtils(params: TorusOptions(
+            clientId: "YOUR_CLIENT_ID",
+            network: .SAPPHIRE_DEVNET,
+            enableOneKey: true,
+            keyType: .ed25519
+        ))
+
+        let result = try await ed25519Torus.getPublicAddress(
+            endpoints: nodeDetails.getTorusNodeSSSEndpoints(),
+            verifier: TORUS_TEST_VERIFIER,
+            verifierId: verifierID
+        )
+
+        XCTAssertEqual(result.finalKeyData?.evmAddress, "HHmiJMCAwhyf9ZWNtj7FEKGXeeC2NjUjPobpDKm43yKs")
+        XCTAssertEqual(result.oAuthKeyData?.evmAddress, "49yLu8yLqpuCXchzjQSt1tpBz8AP2E9EzzP7a8QtxmTE")
+    }
+
+    func test_should_retrieve_ed25519_shares() async throws {
+        let verifierID = "edd2519TestUser951@example.com"
+        let nodeDetails = try await fnd.getNodeDetails(verifier: TORUS_TEST_VERIFIER, verifierID: verifierID)
+        let token = try generateIdToken(email: verifierID)
+        let ed25519Torus = try TorusUtils(params: TorusOptions(
+            clientId: "YOUR_CLIENT_ID",
+            network: .SAPPHIRE_DEVNET,
+            enableOneKey: true,
+            keyType: .ed25519
+        ))
+        let result = try await ed25519Torus.retrieveShares(params: RetrieveSharesParams(
+            endpoints: nodeDetails.getTorusNodeSSSEndpoints(),
+            indexes: nodeDetails.getTorusIndexes(),
+            nodePubKeys: nodeDetails.getTorusNodePub(),
+            verifier: TORUS_TEST_VERIFIER,
+            verifierParams: VerifierParams(verifier_id: verifierID),
+            idToken: token
+        ))
+
+        XCTAssertEqual(result.finalKeyData.evmAddress, "6jNaYT5c1EgYaASeBte79hSQ1m1FKq6fsAzMo8SgxpiF")
+        XCTAssertEqual(result.oAuthKeyData.evmAddress, "CmbriSJicm3fga5cTtwWEmZxC2eMzXbntZRt7CMNoo1w")
+        XCTAssertEqual(result.postboxKeyData.privKey, "4a0629fffdec0303b76e5e8dfabf21edd4e1957e234e180b7767453a0b301bd0")
+        XCTAssertEqual(result.postboxKeyData.X, "ae706aa0becae4b1d6435a42010bdc616254e136d5054bdf431a04e36068fa1c")
+        XCTAssertEqual(result.postboxKeyData.Y, "c54dc56e25661c227ad5bfab26368da7fce8629f22c127b24b2c2db93a3c45f1")
+        XCTAssertFalse(result.finalKeyData.privKey.isEmpty)
+    }
+
     func test_should_fetch_public_address() async throws {
         let verifier = TORUS_TEST_VERIFIER
         let verifierID = TORUS_TEST_EMAIL
@@ -58,11 +105,26 @@ final class SapphireDevnetTest: XCTestCase {
 
         let verifierParams = VerifierParams(verifier_id: verifierID)
 
-        let val = try await torus.importPrivateKey(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), nodeIndexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt, newPrivateKey: privateKey)
+        let val = try await torus.importPrivateKey(params: ImportPrivateKeyParams(
+            endpoints: nodeDetails.getTorusNodeSSSEndpoints(),
+            nodeIndexes: nodeDetails.getTorusIndexes(),
+            nodePubKeys: nodeDetails.getTorusNodePub(),
+            verifier: verifier,
+            verifierParams: verifierParams,
+            idToken: jwt,
+            newPrivateKey: privateKey
+        ))
         XCTAssertEqual(val.finalKeyData.privKey, privateKey)
 
         jwt = try generateIdToken(email: fakeEmail)
-        let shareRetrieval = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let shareRetrieval = try await torus.retrieveShares(params: RetrieveSharesParams(
+            endpoints: nodeDetails.getTorusNodeSSSEndpoints(),
+            indexes: nodeDetails.getTorusIndexes(),
+            nodePubKeys: nodeDetails.getTorusNodePub(),
+            verifier: verifier,
+            verifierParams: verifierParams,
+            idToken: jwt
+        ))
         XCTAssertEqual(shareRetrieval.finalKeyData.privKey, privateKey)
 
         let addressRetrieval = try await torus.getPublicAddress(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierId: verifierID)

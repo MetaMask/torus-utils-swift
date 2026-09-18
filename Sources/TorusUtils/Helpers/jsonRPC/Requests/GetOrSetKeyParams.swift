@@ -8,4 +8,5 @@ internal struct GetOrSetKeyParams: Codable {
     public var one_key_flow: Bool
     public var fetch_node_index: Bool
     public var client_time: String
+    public var key_type: TorusKeyType? = nil
 }

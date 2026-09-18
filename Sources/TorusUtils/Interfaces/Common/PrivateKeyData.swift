@@ -9,4 +9,5 @@ internal struct PrivateKeyData {
     let signingPubKey: String
     let finalKey: String
     let finalPubKey: String
+    let encryptedSeed: String?
 }
