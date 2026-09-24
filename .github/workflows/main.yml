@@ -25,8 +25,8 @@ jobs:
         platform:
           - iOS
     steps:
-      - uses: actions/checkout@v4
-      - uses: mxcl/xcodebuild@v3.0.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: mxcl/xcodebuild@a8cbe270677cf2cc207abc7e70229623d71a9ad6 # v3.0.0
         with:
           platform: ${{ matrix.platform }}
           action: test
