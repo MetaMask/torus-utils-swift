@@ -10,7 +10,6 @@ public struct RetrieveSharesParams {
     public let verifierParams: VerifierParams
     public let idToken: String
     public let extraParams: TorusUtilsExtraParams
-    public let useDkg: Bool?
     public let checkCommitment: Bool
     public let recordId: String?
     public let authConnection: String
@@ -23,7 +22,6 @@ public struct RetrieveSharesParams {
         verifierParams: VerifierParams,
         idToken: String,
         extraParams: TorusUtilsExtraParams = TorusUtilsExtraParams(),
-        useDkg: Bool? = nil,
         checkCommitment: Bool = true,
         recordId: String? = nil,
         authConnection: String = ""
@@ -35,10 +33,37 @@ public struct RetrieveSharesParams {
         self.verifierParams = verifierParams
         self.idToken = idToken
         self.extraParams = extraParams
-        self.useDkg = useDkg
         self.checkCommitment = checkCommitment
         self.recordId = recordId
         self.authConnection = authConnection
+    }
+
+    @available(*, deprecated, message: "useDkg was removed in v12 and is ignored: new users always get a client-generated, imported key. Use init without it.")
+    public init(
+        endpoints: [String],
+        indexes: [BigUInt],
+        nodePubKeys: [TorusNodePubModel],
+        verifier: String,
+        verifierParams: VerifierParams,
+        idToken: String,
+        extraParams: TorusUtilsExtraParams = TorusUtilsExtraParams(),
+        useDkg: Bool?,
+        checkCommitment: Bool = true,
+        recordId: String? = nil,
+        authConnection: String = ""
+    ) {
+        self.init(
+            endpoints: endpoints,
+            indexes: indexes,
+            nodePubKeys: nodePubKeys,
+            verifier: verifier,
+            verifierParams: verifierParams,
+            idToken: idToken,
+            extraParams: extraParams,
+            checkCommitment: checkCommitment,
+            recordId: recordId,
+            authConnection: authConnection
+        )
     }
 }
 

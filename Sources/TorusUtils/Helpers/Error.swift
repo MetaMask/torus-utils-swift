@@ -16,7 +16,6 @@ public enum TorusUtilError: Error, Equatable {
     case metadataNonceMissing
     case pubNonceMissing
     case gatingError(_ msg: String = "")
-    case legacyImportUnsupported(_ network: String)
     case invalidInput
 }
 
@@ -53,8 +52,6 @@ extension TorusUtilError: CustomDebugStringConvertible {
             return "Unable to fetch metadata nonce"
         case let .gatingError(msg):
             return "could not process request" + msg
-        case let .legacyImportUnsupported(network):
-            return "importPrivateKey is not supported by legacy network: " + network
         case .pubNonceMissing:
             return "Public nonce is missing"
         }
@@ -91,8 +88,6 @@ extension TorusUtilError: LocalizedError {
             return "Could not encode data " + msg
         case let .gatingError(msg):
             return msg
-        case let .legacyImportUnsupported(network):
-            return "importPrivateKey is not supported by legacy network: " + network
         default:
             return "default Error msg"
         }

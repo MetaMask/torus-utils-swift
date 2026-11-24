@@ -25,8 +25,6 @@ public class TorusUtils {
 
     var enableOneKey: Bool
 
-    var legacyMetadataHost: String
-
     var apiKey: String = "torus-default"
 
     /// Initializes TorusUtils with the provided options
@@ -43,19 +41,6 @@ public class TorusUtils {
             throw TorusUtilError.runtime("keyType: ed25519 is not supported by \(params.network.name) network")
         }
 
-        let defaultHost: String
-        if let configuredHost = params.legacyMetadataHost {
-            defaultHost = configuredHost
-        } else if params.network.isLegacy {
-            guard let metadataHost = LEGACY_METADATA_MAP[params.buildEnv] else {
-                throw TorusUtilError.configurationError
-            }
-            defaultHost = metadataHost
-        } else {
-            defaultHost = params.network == .SAPPHIRE_MAINNET
-                ? "https://node-1.node.web3auth.io/metadata"
-                : "https://node-1.dev-node.web3auth.io/metadata"
-        }
         serverTimeOffset = params.serverTimeOffset
         network = params.network
         clientId = params.clientId
@@ -64,14 +49,6 @@ public class TorusUtils {
         keyType = params.keyType
         utilsLogType = loglevel
         enableOneKey = params.enableOneKey
-        legacyMetadataHost = defaultHost
-    }
-
-    internal static func isLegacyNetworkRouteMap(network: Web3AuthNetwork) -> Bool {
-        if network.isLegacy {
-            return true
-        }
-        return false
     }
 
     /// Sets the apiKey
@@ -131,16 +108,6 @@ public class TorusUtils {
             throw TorusUtilError.runtime("nodePubKeys length must be same as endpoints length")
         }
 
-        let shouldUseDkg: Bool
-        if let requestedUseDkg = params.useDkg {
-            if !requestedUseDkg, network.isLegacy {
-                throw TorusUtilError.runtime("useDkg cannot be false for legacy network; \(network.name)")
-            }
-            shouldUseDkg = keyType == .ed25519 ? false : requestedUseDkg
-        } else {
-            shouldUseDkg = keyType == .secp256k1
-        }
-
         if params.extraParams.session_token_exp_second == nil {
             params.extraParams.session_token_exp_second = sessionTime
         }
@@ -150,7 +117,6 @@ public class TorusUtils {
 
         do {
             let result = try await NodeUtils.retrieveOrImportShare(
-                legacyMetadataHost: legacyMetadataHost,
                 serverTimeOffset: serverTimeOffset,
                 enableOneKey: enableOneKey,
                 network: network,
@@ -163,13 +129,13 @@ public class TorusUtils {
                 verifierParams: params.verifierParams,
                 idToken: params.idToken,
                 importedShares: [],
-                newPrivateKey: nil,
+                overrideExistingKey: false,
                 extraParams: params.extraParams,
                 keyType: keyType,
-                useDkg: shouldUseDkg,
                 checkCommitment: params.checkCommitment,
                 recordId: recordId,
-                source: source
+                source: source,
+                apiKey: apiKey
             )
 
             if callerSuppliedRecordId {
@@ -209,6 +175,7 @@ public class TorusUtils {
         }
     }
 
+    /// Without node details this can only log in existing users; creating a new key throws.
     @available(*, deprecated, message: "Use retrieveShares(params:) with indexes and nodePubKeys")
     public func retrieveShares(
         endpoints: [String],
@@ -221,7 +188,6 @@ public class TorusUtils {
             extraParams.session_token_exp_second = sessionTime
         }
         return try await NodeUtils.retrieveOrImportShare(
-            legacyMetadataHost: legacyMetadataHost,
             serverTimeOffset: serverTimeOffset,
             enableOneKey: enableOneKey,
             network: network,
@@ -234,13 +200,13 @@ public class TorusUtils {
             verifierParams: verifierParams,
             idToken: idToken,
             importedShares: [],
-            newPrivateKey: nil,
+            overrideExistingKey: false,
             extraParams: extraParams,
             keyType: keyType,
-            useDkg: true,
             checkCommitment: true,
             recordId: CitadelUtils.generateRecordId(),
-            source: source
+            source: source,
+            apiKey: apiKey
         )
     }
 
@@ -275,10 +241,6 @@ public class TorusUtils {
     ///
     /// - Throws: `TorusUtilError`
     public func importPrivateKey(params: ImportPrivateKeyParams) async throws -> TorusKey {
-        if network.isLegacy {
-            throw TorusUtilError.legacyImportUnsupported(network.name)
-        }
-
         let nodePubs = TorusNodePubModelToINodePub(nodes: params.nodePubKeys)
         if params.endpoints.count != params.nodeIndexes.count {
             throw TorusUtilError.runtime("Length of endpoints must be the same as length of nodeIndexes")
@@ -287,20 +249,34 @@ public class TorusUtils {
             throw TorusUtilError.runtime("Length of endpoints must be the same as length of nodePubKeys")
         }
 
+        let privateKeyHex = params.newPrivateKey.addLeading0sForLength64()
+        if privateKeyHex.count != 64 || Data(hex: privateKeyHex).count != 32 {
+            throw TorusUtilError.runtime("Invalid private key length for given \(keyType.rawValue) key")
+        }
+
+        // a legacy dApp without OneKey uses the key itself, so it imports the key with no nonce
+        let withNonce = !network.isLegacy || enableOneKey
         let sharesData = try KeyUtils.generateShares(
             keyType: keyType,
             serverTimeOffset: serverTimeOffset ?? 0,
             nodeIndexes: params.nodeIndexes,
             nodePubKeys: nodePubs,
-            privateKey: params.newPrivateKey
+            privateKey: params.newPrivateKey,
+            withNonce: withNonce
         )
+
+        if keyType == .ed25519 {
+            let importedPubKey = Ed25519Utils.encode(Ed25519Utils.point(fromScalar: try Ed25519Utils.scalar(fromSeed: Data(hex: privateKeyHex))))
+            guard let firstShare = sharesData.first, Ed25519Utils.encode(firstShare.final_user_point) == importedPubKey else {
+                throw TorusUtilError.runtime("invalid shares data for ed25519 key, public key is not matching after generating shares")
+            }
+        }
 
         if params.extraParams.session_token_exp_second == nil {
             params.extraParams.session_token_exp_second = sessionTime
         }
 
-        return try await NodeUtils.retrieveOrImportShare(
-            legacyMetadataHost: legacyMetadataHost,
+        let torusKey = try await NodeUtils.retrieveOrImportShare(
             serverTimeOffset: serverTimeOffset ?? 0,
             enableOneKey: enableOneKey,
             network: network,
@@ -313,14 +289,28 @@ public class TorusUtils {
             verifierParams: params.verifierParams,
             idToken: params.idToken,
             importedShares: sharesData,
-            newPrivateKey: params.newPrivateKey,
+            overrideExistingKey: true,
             extraParams: params.extraParams,
             keyType: keyType,
-            useDkg: false,
             checkCommitment: params.checkCommitment,
             recordId: params.recordId ?? CitadelUtils.generateRecordId(),
-            source: source
+            source: source,
+            apiKey: apiKey
         )
+        try TorusUtils.assertImportedKey(torusKey: torusKey, importedPrivateKey: params.newPrivateKey)
+        return torusKey
+    }
+
+    /// The final key must be the imported key.
+    /// The metadata server keeps a nonce that already exists and still answers with success,
+    /// so if a different nonce was stored first, this check is the only signal that the import nonce was dropped.
+    /// An empty final key (an upgraded account without a private nonce) also fails here.
+    internal static func assertImportedKey(torusKey: TorusKey, importedPrivateKey: String) throws {
+        let finalPrivKey = torusKey.finalKeyData.privKey.addLeading0sForLength64().lowercased()
+        let importedKey = importedPrivateKey.addLeading0sForLength64().lowercased()
+        if finalPrivKey != importedKey {
+            throw TorusUtilError.runtime("imported key mismatch: the nodes returned a different final key than expected, this should never occur, please contact web3auth support.")
+        }
     }
 
     @available(*, deprecated, message: "Use importPrivateKey(params:)")
@@ -349,7 +339,7 @@ public class TorusUtils {
     public func reportSignerAllow(params: CitadelAllowParams) {
         Task {
             do {
-                try await CitadelUtils.callAllowApi(params: params)
+                try await CitadelUtils.callAllowApi(params: params, apiKey: apiKey)
             } catch {
                 os_log(
                     "Failed to log Citadel allow API: %{public}@",
@@ -431,15 +421,16 @@ public class TorusUtils {
     private func getNewPublicAddress(endpoints: [String], verifier: String, verifierId: String, extendedVerifierId: String? = nil, enableOneKey: Bool) async throws -> TorusPublicKey {
         let keyAssignResult = try await NodeUtils.getPubKeyOrKeyAssign(
             endpoints: endpoints,
-            network: network,
             verifier: verifier,
             verifierId: verifierId,
-            legacyMetadataHost: legacyMetadataHost,
             serverTimeOffset: serverTimeOffset,
             extendedVerifierId: extendedVerifierId,
             keyType: keyType
         )
+        return try formatPublicKeyData(keyAssignResult: keyAssignResult, extendedVerifierId: extendedVerifierId, enableOneKey: enableOneKey)
+    }
 
+    internal func formatPublicKeyData(keyAssignResult: KeyLookupResult, extendedVerifierId: String?, enableOneKey: Bool) throws -> TorusPublicKey {
         if keyAssignResult.errorResult != nil {
             let error = keyAssignResult.errorResult!.message
             if error.lowercased().contains("verifier not supported") {
@@ -449,64 +440,58 @@ public class TorusUtils {
             }
         }
 
-        if keyAssignResult.keyResult == nil || keyAssignResult.keyResult?.keys.count == 0 {
+        // no need of nonce for extendedVerifierId (tss verifier id)
+        guard let assignedKey = keyAssignResult.keyResult?.keys.first else {
             throw TorusUtilError.runtime("node results do not match at final lookup")
         }
-
-        if keyAssignResult.nonceResult == nil && extendedVerifierId == nil && !TorusUtils.isLegacyNetworkRouteMap(network: network) {
+        let nonceResult = keyAssignResult.nonceResult
+        if nonceResult == nil && extendedVerifierId == nil {
             throw TorusUtilError.runtime("metadata nonce is missing in share response")
         }
 
-        let pubKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: keyAssignResult.keyResult!.keys[0].pub_key_X, pubKeyY: keyAssignResult.keyResult!.keys[0].pub_key_Y)
-
+        let oAuthPoint = try Point(x: assignedKey.pub_key_X, y: assignedKey.pub_key_Y)
         var pubNonce: PubNonce?
-        let nonce: BigUInt = BigUInt(keyAssignResult.nonceResult?.nonce ?? "0", radix: 16) ?? BigUInt(0)
+        var nonce: BigUInt = BigUInt(nonceResult?.nonce ?? "0", radix: 16) ?? BigUInt(0)
+        var typeOfUser: UserType = nonceResult?.typeOfUser == UserType.v1.rawValue ? .v1 : .v2
+        let finalPoint: Point
 
-        var oAuthPubKey: String?
-        var finalPubKey: String?
-
-        let finalServerTimeOffset = serverTimeOffset ?? keyAssignResult.serverTimeOffset
+        // 0 means unset, as in torus.js
+        let finalServerTimeOffset = (serverTimeOffset ?? 0) != 0 ? serverTimeOffset! : keyAssignResult.serverTimeOffset
 
         if extendedVerifierId != nil {
-            finalPubKey = pubKey
-            oAuthPubKey = finalPubKey
-        } else if TorusUtils.isLegacyNetworkRouteMap(network: network) {
-            let legacyKeysResult = keyAssignResult.keyResult!.keys.map({
-                LegacyVerifierLookupResponse.Key(pub_key_X: $0.pub_key_X, pub_key_Y: $0.pub_key_Y, address: $0.address)
-            })
-            let legacyResult = LegacyVerifierLookupResponse(keys: legacyKeysResult, serverTimeOffset: String(finalServerTimeOffset))
-            return try await formatLegacyPublicKeyData(finalKeyResult: legacyResult, enableOneKey: enableOneKey, isNewKey: keyAssignResult.keyResult!.is_new_key, serverTimeOffset: finalServerTimeOffset)
-        } else {
-            let X = keyAssignResult.keyResult!.keys[0].pub_key_X
-            let Y = keyAssignResult.keyResult!.keys[0].pub_key_Y
-            let oAuthPoint = try Point(x: X, y: Y)
-            oAuthPubKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: X, pubKeyY: Y)
-            finalPubKey = oAuthPubKey!
-            if keyAssignResult.nonceResult!.pubNonce != nil && !(keyAssignResult.nonceResult!.pubNonce!.x.isEmpty || keyAssignResult.nonceResult!.pubNonce!.y.isEmpty) {
-                let pubNonceResult = keyAssignResult.nonceResult!.pubNonce!
-                let combined = try KeyUtils.combinePublicPoints(
+            // for tss key no need to add pub nonce
+            finalPoint = oAuthPoint
+        } else if nonceResult?.typeOfUser == UserType.v1.rawValue {
+            finalPoint = nonce > BigUInt(0)
+                ? try KeyUtils.combinePublicPoints(
                     keyType: keyType,
                     first: oAuthPoint,
-                    second: try Point(x: pubNonceResult.x, y: pubNonceResult.y)
+                    second: try KeyUtils.publicPoint(privateKey: nonce.serialize().hexString.addLeading0sForLength64(), keyType: keyType)
                 )
-                finalPubKey = KeyUtils.getPublicKeyFromCoords(
-                    pubKeyX: String(combined.x, radix: 16),
-                    pubKeyY: String(combined.y, radix: 16)
-                )
-                pubNonce = pubNonceResult
-            } else {
+                : oAuthPoint
+        } else if network.isLegacy && !enableOneKey {
+            // a legacy dApp without OneKey ignores a v2 nonce
+            finalPoint = oAuthPoint
+            nonce = BigUInt(0)
+            typeOfUser = .v1
+        } else {
+            guard let pubNonceResult = nonceResult?.pubNonce, !pubNonceResult.x.isEmpty, !pubNonceResult.y.isEmpty else {
                 throw TorusUtilError.pubNonceMissing
             }
+            finalPoint = try KeyUtils.combinePublicPoints(
+                keyType: keyType,
+                first: oAuthPoint,
+                second: try Point(x: pubNonceResult.x, y: pubNonceResult.y)
+            )
+            pubNonce = pubNonceResult
         }
 
-        if oAuthPubKey == nil || finalPubKey == nil {
-            throw TorusUtilError.privateKeyDeriveFailed
-        }
-
-        let (oAuthPubKeyX, oAuthPubKeyY) = try KeyUtils.getPublicKeyCoords(pubKey: oAuthPubKey!)
+        let oAuthPubKeyX = String(oAuthPoint.x, radix: 16).addLeading0sForLength64()
+        let oAuthPubKeyY = String(oAuthPoint.y, radix: 16).addLeading0sForLength64()
         let oAuthAddress = try KeyUtils.generateAddressFromPubKey(keyType: keyType, publicKeyX: oAuthPubKeyX, publicKeyY: oAuthPubKeyY)
 
-        let (finalPubKeyX, finalPubKeyY) = try KeyUtils.getPublicKeyCoords(pubKey: finalPubKey!)
+        let finalPubKeyX = String(finalPoint.x, radix: 16).addLeading0sForLength64()
+        let finalPubKeyY = String(finalPoint.y, radix: 16).addLeading0sForLength64()
         let finalAddress = try KeyUtils.generateAddressFromPubKey(keyType: keyType, publicKeyX: finalPubKeyX, publicKeyY: finalPubKeyY)
 
         return TorusPublicKey(
@@ -523,92 +508,13 @@ public class TorusUtils {
             metadata: TorusPublicKey.Metadata(
                 pubNonce: pubNonce,
                 nonce: nonce,
-                typeOfUser: .v2,
-                upgraded: keyAssignResult.nonceResult?.upgraded ?? false,
+                typeOfUser: typeOfUser,
+                upgraded: typeOfUser == .v2 ? (nonceResult?.upgraded ?? false) : false,
                 serverTimeOffset: finalServerTimeOffset
             ),
             nodesData: TorusPublicKey.NodesData(
                 nodeIndexes: keyAssignResult.nodeIndexes
             )
-        )
-    }
-
-    internal func formatLegacyPublicKeyData(finalKeyResult: LegacyVerifierLookupResponse, enableOneKey: Bool, isNewKey: Bool, serverTimeOffset: Int) async throws -> TorusPublicKey {
-        let firstResult = finalKeyResult.keys[0]
-        let X = firstResult.pub_key_X
-        let Y = firstResult.pub_key_Y
-
-        var nonceResult: GetOrSetNonceResult?
-        var finalPubKey: String?
-        var nonce: BigUInt?
-        var typeOfUser: UserType
-        var pubNonce: PubNonce?
-
-        let oAuthPubKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: X, pubKeyY: Y)
-
-        let finalServertimeOffset = self.serverTimeOffset ?? serverTimeOffset
-
-        if enableOneKey {
-            nonceResult = try await MetadataUtils.getOrSetNonce(legacyMetadataHost: legacyMetadataHost, serverTimeOffset: finalServertimeOffset, X: X, Y: Y, getOnly: !isNewKey)
-            nonce = BigUInt(nonceResult!.nonce ?? "0", radix: 16)
-            typeOfUser = UserType(rawValue: nonceResult?.typeOfUser?.lowercased() ?? "v1")!
-
-            if typeOfUser == .v1 {
-                finalPubKey = oAuthPubKey
-                nonce = try await MetadataUtils.getMetadata(legacyMetadataHost: legacyMetadataHost, params: GetMetadataParams(pub_key_X: X, pub_key_Y: Y))
-
-                if nonce! > BigUInt(0) {
-                    let noncePrivateKey = try SecretKey(hex: nonce!.magnitude.serialize().hexString.addLeading0sForLength64())
-                    let noncePublicKey = try noncePrivateKey.toPublic().serialize(compressed: false)
-                    finalPubKey = try KeyUtils.combinePublicKeys(keys: [finalPubKey!, noncePublicKey])
-                }
-            } else if typeOfUser == .v2 {
-                let pubNonceKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: nonceResult!.pubNonce!.x, pubKeyY: nonceResult!.pubNonce!.y)
-                finalPubKey = try KeyUtils.combinePublicKeys(keys: [oAuthPubKey, pubNonceKey])
-                pubNonce = nonceResult!.pubNonce!
-            } else {
-                throw TorusUtilError.metadataNonceMissing
-            }
-        } else {
-            typeOfUser = .v1
-            finalPubKey = oAuthPubKey
-            nonce = try await MetadataUtils.getMetadata(legacyMetadataHost: legacyMetadataHost, params: GetMetadataParams(pub_key_X: X, pub_key_Y: Y))
-
-            if nonce! > BigUInt(0) {
-                let noncePrivateKey = try SecretKey(hex: nonce!.magnitude.serialize().hexString.addLeading0sForLength64())
-                let noncePublicKey = try noncePrivateKey.toPublic().serialize(compressed: false)
-                finalPubKey = try KeyUtils.combinePublicKeys(keys: [finalPubKey!, noncePublicKey])
-            }
-        }
-
-        let oAuthAddress = try KeyUtils.generateAddressFromPubKey(publicKeyX: X, publicKeyY: Y)
-
-        if typeOfUser == .v2 && finalPubKey == nil {
-            throw TorusUtilError.privateKeyDeriveFailed
-        }
-
-        let (finalPubKeyX, finalPubKeyY) = try KeyUtils.getPublicKeyCoords(pubKey: finalPubKey!)
-
-        let finalAddress = try KeyUtils.generateAddressFromPubKey(publicKeyX: finalPubKeyX, publicKeyY: finalPubKeyY)
-
-        return TorusPublicKey(
-            oAuthKeyData: TorusPublicKey.OAuthKeyData(
-                evmAddress: oAuthAddress,
-                X: X.addLeading0sForLength64(),
-                Y: Y.addLeading0sForLength64()
-            ),
-            finalKeyData: TorusPublicKey.FinalKeyData(
-                evmAddress: finalAddress,
-                X: finalPubKeyX,
-                Y: finalPubKeyY
-            ),
-            metadata: TorusPublicKey.Metadata(
-                pubNonce: pubNonce,
-                nonce: nonce,
-                typeOfUser: typeOfUser,
-                upgraded: nonceResult?.upgraded ?? false,
-                serverTimeOffset: finalServertimeOffset),
-            nodesData: TorusPublicKey.NodesData(nodeIndexes: [])
         )
     }
 }

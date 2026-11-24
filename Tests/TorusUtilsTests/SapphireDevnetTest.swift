@@ -205,7 +205,7 @@ final class SapphireDevnetTest: XCTestCase {
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
 
         let verifierParams = VerifierParams(verifier_id: verifierID, extended_verifier_id: tssVerifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: token)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: token))
 
         XCTAssertNotNil(data.finalKeyData.privKey)
         XCTAssertNotNil(data.oAuthKeyData.evmAddress)
@@ -272,7 +272,7 @@ final class SapphireDevnetTest: XCTestCase {
 
         let verifierParams = VerifierParams(verifier_id: verifierID)
 
-        let val = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let val = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertLessThan(val.metadata.serverTimeOffset, 20)
 
@@ -301,7 +301,7 @@ final class SapphireDevnetTest: XCTestCase {
 
         let verifierParams = VerifierParams(verifier_id: verifierID)
 
-        let val = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let val = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertLessThan(val.metadata.serverTimeOffset, 20)
 
@@ -328,7 +328,7 @@ final class SapphireDevnetTest: XCTestCase {
         let hashedIDToken = try KeyUtils.keccak256Data(jwt)
         let verifierParams = VerifierParams(verifier_id: email, sub_verifier_ids: [TORUS_TEST_VERIFIER], verify_params: [VerifyParams(verifier_id: email, idtoken: jwt)])
         let nodeDetails = try await fnd.getNodeDetails(verifier: TORUS_TEST_AGGREGATE_VERIFIER, verifierID: email)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), verifier: TORUS_TEST_AGGREGATE_VERIFIER, verifierParams: verifierParams, idToken: hashedIDToken)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeSSSEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: TORUS_TEST_AGGREGATE_VERIFIER, verifierParams: verifierParams, idToken: hashedIDToken))
 
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
         XCTAssertNotNil(data.finalKeyData.privKey)
@@ -348,7 +348,7 @@ final class SapphireDevnetTest: XCTestCase {
         let customSessionTime = Int(3600)
         torus.setSessionTime(sessionTime: customSessionTime)
 
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         let signatures = data.sessionData.sessionTokenData.map({ $0!.token })
         let parsedSignatures = signatures.map({

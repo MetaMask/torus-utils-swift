@@ -120,7 +120,7 @@ class AquaTest: XCTestCase {
         let verifierParams = VerifierParams(verifier_id: verifierID)
         let jwt = try! generateIdToken(email: verifierID)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
 
@@ -150,7 +150,7 @@ class AquaTest: XCTestCase {
 
         let verifierParams = VerifierParams(verifier_id: verifierID, sub_verifier_ids: [TORUS_TEST_VERIFIER], verify_params: [VerifyParams(verifier_id: TORUS_TEST_EMAIL, idtoken: jwt)])
 
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken))
         XCTAssertEqual(data.finalKeyData.evmAddress, "0x5b58d8a16fDA79172cd42Dc3068d5CEf26a5C81D")
         XCTAssertEqual(data.finalKeyData.X, "37a4ac8cbef68e88bcec5909d9b6fffb539187365bb723f3d7bffe56ae80e31d")
         XCTAssertEqual(data.finalKeyData.Y, "f963f2d08ed4dd0da9b8a8d74c6fdaeef7bdcde31f84fcce19fa2173d40b2c10")
@@ -174,7 +174,7 @@ class AquaTest: XCTestCase {
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
         var endpoints = nodeDetails.getTorusNodeEndpoints()
         endpoints[endpoints.count - 1] = "https://ndjnfjbfrj/random"
-        let data = try await torus.retrieveShares(endpoints: endpoints, verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: endpoints, indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
         XCTAssertEqual(data.finalKeyData.privKey, "f726ce4ac79ae4475d72633c94769a8817aff35eebe2d4790aed7b5d8a84aa1d")
     }
 }

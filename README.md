@@ -14,7 +14,7 @@ You can install the TorusUtils using Swift Package Manager:
 ...
 dependencies: [
     ...
-    .package(url: "https://github.com/torusresearch/torus-utils-swift", from: "11.0.0")
+    .package(url: "https://github.com/torusresearch/torus-utils-swift", from: "12.0.0")
 ],
 targets: [
     .target( name: "<INSERT_TARGET_NAME>",
@@ -30,7 +30,7 @@ Or CocoaPods:
 
 ```
 ...
-    pod 'Torus-utils', '~> 11.0.0'
+    pod 'Torus-utils', '~> 12.0.0'
 ...
 ```
 
@@ -92,6 +92,37 @@ do {
     // Handle error
 }
 ```
+
+## Migrating from 11.x to 12.0
+
+Version 12 aligns the Swift SDK with `@toruslabs/torus.js` 19.0.0 (the "one
+key flow") and is a breaking release:
+
+- `useDkg` is removed from `RetrieveSharesParams`. New users always get a
+  client-generated key that is imported to the nodes. The deprecated
+  initializer that takes `useDkg` ignores it.
+- `legacyMetadataHost` is removed from `TorusOptions`. The deprecated
+  initializer that takes it ignores it.
+- The metadata nonce now comes only from the node responses
+  (`GetPubKeyOrKeyAssign`, `GetShareOrKeyAssign`, `VerifierLookupRequest`), on
+  every network. The SDK no longer calls the metadata server.
+- On legacy networks without `enableOneKey`, a new user's key is imported as a
+  v1 key with no nonce, so the final key is the OAuth key.
+- `importPrivateKey` now works on legacy networks. After the import, it checks
+  that the nodes returned the imported key, and throws
+  `imported key mismatch: ...` if they did not.
+  `TorusUtilError.legacyImportUnsupported` is removed.
+- Creating a new user requires node indexes and public keys. Pass
+  `nodeDetails.getTorusIndexes()` and `nodeDetails.getTorusNodePub()` in
+  `RetrieveSharesParams`. The deprecated `retrieveShares(endpoints:...)` can
+  only log in existing users, and throws
+  `nodePubkeys and indexes are required to create a new key` for new ones.
+- `importPrivateKey` throws `Invalid private key length for given <keyType> key`
+  unless the key is 32 bytes.
+- A `serverTimeOffset` of `0` means unset, so `metadata.serverTimeOffset` is the
+  median offset reported by the nodes.
+- The Citadel allow call sends `x-api-key` only when a custom key is set with
+  `setApiKey(apiKey:)`.
 
 ## Migrating from 10.x to 11.0
 

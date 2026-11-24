@@ -142,8 +142,13 @@ public enum CitadelUtils {
         )
     }
 
-    public static func callAllowApi(params: CitadelAllowParams) async throws {
-        let (_, response) = try await URLSession.shared.data(from: buildAllowUrl(params: params))
+    /// `x-api-key` is sent only for a custom `apiKey`, never for the default `torus-default` key.
+    public static func callAllowApi(params: CitadelAllowParams, apiKey: String? = nil) async throws {
+        var request = URLRequest(url: try buildAllowUrl(params: params))
+        if let apiKey, apiKey != "torus-default" {
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        }
+        let (_, response) = try await URLSession.shared.data(for: request)
         try validate(response)
     }
 
