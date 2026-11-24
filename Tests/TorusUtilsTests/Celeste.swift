@@ -119,7 +119,7 @@ class CelesteTest: XCTestCase {
         let jwt = try! generateIdToken(email: verifierID)
         let verifierParams = VerifierParams(verifier_id: verifierID)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertEqual(data.finalKeyData.evmAddress, "0x58420FB83971C4490D8c9B091f8bfC890D716617")
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
@@ -148,7 +148,7 @@ class CelesteTest: XCTestCase {
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
 
         let verifierParams = VerifierParams(verifier_id: verifierID, sub_verifier_ids: [TORUS_TEST_VERIFIER], verify_params: [VerifyParams(verifier_id: verifierID, idtoken: jwt)])
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken))
 
         XCTAssertEqual(data.finalKeyData.evmAddress, "0x535Eb1AefFAc6f699A2a1A5846482d7b5b2BD564")
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)

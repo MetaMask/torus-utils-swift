@@ -151,10 +151,12 @@ public class KeyUtils {
         return added
     }
 
-    internal static func generateKeyData(privateKey: String) throws -> PrivateKeyData {
+    /// - Parameters:
+    ///   - withNonce: `false` splits the key itself and uses a zero nonce (v1 import).
+    internal static func generateKeyData(privateKey: String, withNonce: Bool = true) throws -> PrivateKeyData {
         let scalar = BigInt(privateKey, radix: 16)!
 
-        let randomNonce = BigInt(try SecretKey().serialize().addLeading0sForLength64(), radix: 16)!
+        let randomNonce = withNonce ? BigInt(try SecretKey().serialize().addLeading0sForLength64(), radix: 16)! : BigInt(0)
 
         let oAuthKey = (scalar - randomNonce).modulus(KeyUtils.getOrderOfCurve())
 
@@ -271,10 +273,15 @@ public class KeyUtils {
         )
     }
 
-    internal static func generateShares(keyType: TorusKeyType = .secp256k1, serverTimeOffset: Int, nodeIndexes: [BigUInt], nodePubKeys: [INodePub], privateKey: String) throws -> [ImportedShare] {
+    /// - Parameters:
+    ///   - withNonce: `false` splits the key itself and sends no nonce data (v1 import).
+    internal static func generateShares(keyType: TorusKeyType = .secp256k1, serverTimeOffset: Int, nodeIndexes: [BigUInt], nodePubKeys: [INodePub], privateKey: String, withNonce: Bool = true) throws -> [ImportedShare] {
+        if !withNonce && keyType != .secp256k1 {
+            throw TorusUtilError.runtime("an import with no nonce supports only secp256k1 keys")
+        }
         let keyData = try keyType == .ed25519
             ? generateEd25519KeyData(seedHex: privateKey)
-            : generateKeyData(privateKey: privateKey)
+            : generateKeyData(privateKey: privateKey, withNonce: withNonce)
 
         let threshold = Int(trunc(Double((nodePubKeys.count / 2) + 1)))
         let degree = threshold - 1
@@ -296,14 +303,20 @@ public class KeyUtils {
                 Share(shareIndex: index, share: result)
             )
         })
-        let nonceParams = try KeyUtils.generateNonceMetadataParams(
-            operation: "getOrSetNonce",
-            privateKey: BigInt(keyData.signingKey, radix: 16)!,
-            nonce: BigInt(keyData.nonce, radix: 16),
-            serverTimeOffset: serverTimeOffset,
-            keyType: keyType,
-            seed: keyData.encryptedSeed
-        )
+        var nonceData = ""
+        var nonceSignature = ""
+        if withNonce {
+            let nonceParams = try KeyUtils.generateNonceMetadataParams(
+                operation: "getOrSetNonce",
+                privateKey: BigInt(keyData.signingKey, radix: 16)!,
+                nonce: BigInt(keyData.nonce, radix: 16),
+                serverTimeOffset: serverTimeOffset,
+                keyType: keyType,
+                seed: keyData.encryptedSeed
+            )
+            nonceData = nonceParams.encodedData
+            nonceSignature = nonceParams.signature
+        }
 
         var encShares: [Ecies] = []
         for i in 0 ..< nodePubKeys.count {
@@ -337,8 +350,8 @@ public class KeyUtils {
                 encryptedSeed: keyData.encryptedSeed,
                 node_index: Int(nodeIndexes[i].magnitude.serialize().hexString.addLeading0sForLength64(), radix: 16)!,
                 key_type: keyType,
-                nonce_data: nonceParams.encodedData,
-                nonce_signature: nonceParams.signature)
+                nonce_data: nonceData,
+                nonce_signature: nonceSignature)
             sharesData.append(importShare)
         }
 

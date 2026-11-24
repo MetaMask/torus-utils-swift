@@ -46,7 +46,7 @@ class OneKeyTest: XCTestCase {
         let verifierID: String = email
         let verifierParams = VerifierParams(verifier_id: verifierID)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
 
@@ -73,7 +73,7 @@ class OneKeyTest: XCTestCase {
         let verifierParams = VerifierParams(verifier_id: verifierID, sub_verifier_ids: [TORUS_TEST_VERIFIER], verify_params: [VerifyParams(verifier_id: TORUS_TEST_EMAIL, idtoken: jwt)])
         let hashedIDToken = try KeyUtils.keccak256Data(jwt)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken))
 
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
 
@@ -113,7 +113,7 @@ class OneKeyTest: XCTestCase {
         let jwt = try! generateIdToken(email: verifierID)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
         let verifierParams = VerifierParams(verifier_id: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertEqual(data.metadata.typeOfUser, .v2)
         XCTAssertNotEqual(data.metadata.nonce, BigUInt(0))
@@ -129,7 +129,7 @@ class OneKeyTest: XCTestCase {
         let verifierID: String = email
         let verifierParams = VerifierParams(verifier_id: verifierID)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
 

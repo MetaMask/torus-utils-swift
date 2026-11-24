@@ -7,12 +7,42 @@ import OSLog
 #endif
 
 internal class NodeUtils {
+    internal static var session = URLSession(configuration: .default)
+
+    /// Picks the first node answer that carries a usable nonce.
+    /// For a new key, a v1 answer counts only with a nonce, because a node that has not seen the first nonce write also answers v1.
+    internal static func firstNodeNonce(_ nonceDatas: [GetOrSetNonceResult?], isNewKey: Bool) -> GetOrSetNonceResult? {
+        return nonceDatas.first(where: { item in
+            guard let item else { return false }
+            let hasPubNonce = !(item.pubNonce?.x.isEmpty ?? true)
+            let hasNonce = !(item.nonce?.isEmpty ?? true)
+            return hasPubNonce || (item.typeOfUser == UserType.v1.rawValue && (hasNonce || !isNewKey))
+        }) ?? nil
+    }
+
+    /// True when any node that agrees on the threshold public key says the key is new.
+    internal static func isNewKeyResponse(_ shareResponses: [ShareRequestResult], thresholdPublicKey: KeyAssignment.PublicKey) -> Bool {
+        return shareResponses.contains(where: {
+            $0.isNewKey == "true" && $0.keys.first?.publicKey.X.lowercased() == thresholdPublicKey.X.lowercased()
+        })
+    }
+
+    /// Nonce data from the first node that agrees on the threshold public key and carries a usable nonce.
+    internal static func selectThresholdNonce(_ shareResponses: [ShareRequestResult], thresholdPublicKey: KeyAssignment.PublicKey, isNewKey: Bool) -> GetOrSetNonceResult? {
+        let thresholdPubKeyX = thresholdPublicKey.X.addLeading0sForLength64().lowercased()
+        let nonceDatas: [GetOrSetNonceResult?] = shareResponses.map({ item in
+            guard let key = item.keys.first, key.publicKey.X.addLeading0sForLength64().lowercased() == thresholdPubKeyX else {
+                return nil
+            }
+            return key.nonceData
+        })
+        return firstNodeNonce(nonceDatas, isNewKey: isNewKey)
+    }
+
     public static func getPubKeyOrKeyAssign(
         endpoints: [String],
-        network: Web3AuthNetwork,
         verifier: String,
         verifierId: String,
-        legacyMetadataHost: String,
         serverTimeOffset: Int? = nil,
         extendedVerifierId: String? = nil,
         keyType: TorusKeyType = .secp256k1) async throws -> KeyLookupResult {
@@ -28,16 +58,15 @@ internal class NodeUtils {
         encoder.outputFormatting = .sortedKeys
         let rpcdata = try encoder.encode(jsonRPCRequest)
 
-        var nonceResult: GetOrSetNonceResult?
         var nodeIndexes: [Int] = []
 
-        let (keyResult, lookupResults, errorResult): (KeyLookupResult.KeyResult?, [JRPCResponse<VerifierLookupResponse>?], ErrorMessage?) = try await withThrowingTaskGroup(of: JRPCResponse?.self, returning: (KeyLookupResult.KeyResult?, [JRPCResponse<VerifierLookupResponse>?], ErrorMessage?).self) { group -> (KeyLookupResult.KeyResult?, [JRPCResponse<VerifierLookupResponse>?], ErrorMessage?) in
+        let (keyResult, lookupResults, errorResult, nonceResult): (KeyLookupResult.KeyResult?, [JRPCResponse<VerifierLookupResponse>?], ErrorMessage?, GetOrSetNonceResult?) = try await withThrowingTaskGroup(of: JRPCResponse?.self, returning: (KeyLookupResult.KeyResult?, [JRPCResponse<VerifierLookupResponse>?], ErrorMessage?, GetOrSetNonceResult?).self) { group -> (KeyLookupResult.KeyResult?, [JRPCResponse<VerifierLookupResponse>?], ErrorMessage?, GetOrSetNonceResult?) in
             for endpoint in endpoints {
                 group.addTask {
                     do {
                         var request = try MetadataUtils.makeUrlRequest(url: endpoint)
                         request.httpBody = rpcdata
-                        let val = try await URLSession(configuration: .default).data(for: request)
+                        let val = try await session.data(for: request)
                         let decoded = try JSONDecoder().decode(JRPCResponse<VerifierLookupResponse>.self, from: val.0)
                         return decoded
                     } catch {
@@ -49,10 +78,11 @@ internal class NodeUtils {
             var errorResult: ErrorMessage?
             var lookupPubKeys = [JRPCResponse<VerifierLookupResponse>?]()
             var keyResult: KeyLookupResult.KeyResult?
+            var nonceResult: GetOrSetNonceResult?
             for try await value in group {
                 collected.append(value)
 
-                lookupPubKeys = collected.filter({ $0 != nil && $0?.error == nil })
+                lookupPubKeys = collected.filter({ $0 != nil && $0?.error == nil && $0?.result != nil })
 
                 errorResult = try thresholdSame(arr: collected.filter({ $0?.error != nil }).map { $0?.error }, threshold: threshold) as? ErrorMessage
 
@@ -60,62 +90,48 @@ internal class NodeUtils {
 
                 keyResult = try thresholdSame(arr: normalizedKeyResults, threshold: threshold)
 
-                if keyResult != nil {
+                // the metadata nonce comes only from the node responses, on every network
+                if let thresholdKey = keyResult?.keys.first, nonceResult == nil, extendedVerifierId == nil {
+                    let thresholdPubKeyX = thresholdKey.pub_key_X.addLeading0sForLength64().lowercased()
+                    nonceResult = firstNodeNonce(
+                        collected.map({ x1 in
+                            guard let currentKey = x1?.error == nil ? x1?.result?.keys.first : nil,
+                                  currentKey.pub_key_X.addLeading0sForLength64().lowercased() == thresholdPubKeyX
+                            else {
+                                return nil
+                            }
+                            return currentKey.nonce_data
+                        }),
+                        isNewKey: keyResult!.is_new_key
+                    )
+                }
+
+                // keep reading node responses until one of them carries the nonce
+                if (keyResult != nil && (nonceResult != nil || extendedVerifierId != nil)) || errorResult != nil {
                     group.cancelAll()
+                    break
                 }
             }
-            return (keyResult, lookupPubKeys, errorResult)
+            return (keyResult, lookupPubKeys, errorResult, nonceResult)
         }
 
-        let lookupHasUsablePublicNonce = nonceResult?.pubNonce.map {
-            !$0.x.isEmpty && !$0.y.isEmpty
-        } ?? false
-        if keyResult != nil && !lookupHasUsablePublicNonce && extendedVerifierId == nil && !TorusUtils.isLegacyNetworkRouteMap(network: network) {
-            for i in 0 ..< lookupResults.count {
-                let x1 = lookupResults[i]
-                if x1 != nil && x1?.error == nil {
-                    let currentNodePubKeyX = x1!.result!.keys[0].pub_key_X.addLeading0sForLength64().lowercased()
-                    let thresholdPubKeyX = keyResult!.keys[0].pub_key_X.addLeading0sForLength64().lowercased()
-                    let pubNonce: PubNonce? = x1!.result!.keys[0].nonce_data?.pubNonce
-                    if let pubNonce,
-                       !pubNonce.x.isEmpty,
-                       !pubNonce.y.isEmpty,
-                       currentNodePubKeyX == thresholdPubKeyX
-                    {
-                        nonceResult = x1?.result?.keys[0].nonce_data
-                        break
-                    }
-                }
-            }
-
-            let foundUsablePublicNonce = nonceResult?.pubNonce.map {
-                !$0.x.isEmpty && !$0.y.isEmpty
-            } ?? false
-            if !foundUsablePublicNonce {
-                let metadataNonce = try await MetadataUtils.getOrSetSapphireMetadataNonce(metadataHost: legacyMetadataHost, network: network, X: keyResult!.keys[0].pub_key_X, Y: keyResult!.keys[0].pub_key_Y, keyType: keyType)
-                nonceResult = metadataNonce
-                if nonceResult!.nonce != nil {
-                    nonceResult!.nonce = nil
-                }
-            }
+        // nonceResult must exist except for extendedVerifierId along with keyResult
+        guard (keyResult != nil && (nonceResult != nil || extendedVerifierId != nil)) || errorResult != nil else {
+            throw TorusUtilError.runtime("invalid public key result: nonce data found: \(nonceResult != nil), for verifier: \(verifier), verifierId: \(verifierId) and extendedVerifierId: \(extendedVerifierId ?? "")")
         }
 
         var serverTimeOffsets: [Int] = []
-        if keyResult != nil && (nonceResult != nil || extendedVerifierId != nil || TorusUtils.isLegacyNetworkRouteMap(network: network) || errorResult != nil) {
-            for i in 0 ..< lookupResults.count {
-                let x1 = lookupResults[i]
-                if x1 != nil && x1?.result != nil {
-                    let currentNodePubKey = x1!.result!.keys[0].pub_key_X.lowercased()
-                    let thresholdPubKey = keyResult!.keys[0].pub_key_X.lowercased()
-                    if currentNodePubKey == thresholdPubKey {
-                        let nodeIndex = Int(x1!.result!.node_index)
-                        if nodeIndex != nil {
-                            nodeIndexes.append(nodeIndex!)
-                        }
+        if let thresholdKey = keyResult?.keys.first {
+            for x1 in lookupResults {
+                guard let result = x1?.result, let currentKey = result.keys.first else { continue }
+                // push only those indexes for nodes who are returning pub key matching with threshold pub key.
+                // this check is important when different nodes have different keys assigned to a user.
+                if currentKey.pub_key_X.lowercased() == thresholdKey.pub_key_X.lowercased() {
+                    if let nodeIndex = Int(result.node_index) {
+                        nodeIndexes.append(nodeIndex)
                     }
-                    let serverTimeOffset: Int = Int(x1!.result!.server_time_offset ?? "0")!
-                    serverTimeOffsets.append(serverTimeOffset)
                 }
+                serverTimeOffsets.append(Int(result.server_time_offset ?? "0") ?? 0)
             }
         }
 
@@ -130,7 +146,6 @@ internal class NodeUtils {
     }
 
     public static func retrieveOrImportShare(
-        legacyMetadataHost: String,
         serverTimeOffset: Int?,
         enableOneKey: Bool,
         network: Web3AuthNetwork,
@@ -143,15 +158,16 @@ internal class NodeUtils {
         verifierParams: VerifierParams,
         idToken: String,
         importedShares: [ImportedShare]?,
-        newPrivateKey: String?,
+        overrideExistingKey: Bool,
         extraParams: TorusUtilsExtraParams,
         keyType: TorusKeyType,
-        useDkg: Bool,
         checkCommitment: Bool,
         recordId: String,
         source: String?
     ) async throws -> TorusKey {
         let threshold = Int(trunc(Double((endpoints.count / 2) + 1)))
+        // a legacy dApp without OneKey uses the oAuth key itself, so its new keys store no nonce
+        let legacyWithoutOneKey = network.isLegacy && !enableOneKey
 
         do {
             try await CitadelUtils.callAllowApi(params: CitadelAllowParams(
@@ -178,108 +194,66 @@ internal class NodeUtils {
         let sessionAuthKeySerialized = try sessionAuthKey.serialize().addLeading0sForLength64()
         let pubKey = try sessionAuthKey.toPublic().serialize(compressed: false)
         let (pubX, pubY) = try KeyUtils.getPublicKeyCoords(pubKey: pubKey)
-        let tokenCommitment = try KeyUtils.keccak256Data(idToken)
 
-        let callerImportedShares = !(importedShares?.isEmpty ?? true)
-        var finalImportedShares = importedShares ?? []
-        var finalPrivateKey = newPrivateKey
-        if finalImportedShares.isEmpty && !useDkg {
-            guard indexes.count == endpoints.count, nodePubKeys.count == endpoints.count else {
-                throw TorusUtilError.runtime("indexes and nodePubKeys must match endpoints when useDkg is false")
+        let canGenerateShares = indexes.count == endpoints.count && nodePubKeys.count == endpoints.count
+        var finalImportedShares: [ImportedShare] = []
+        if let importedShares, !importedShares.isEmpty {
+            if importedShares.count != endpoints.count {
+                throw TorusUtilError.runtime("Invalid imported shares length")
             }
-            finalPrivateKey = try KeyUtils.generateSecret()
+            finalImportedShares = importedShares
+        } else if canGenerateShares {
+            // new users always get a client-generated, imported key
             finalImportedShares = try KeyUtils.generateShares(
                 keyType: keyType,
                 serverTimeOffset: serverTimeOffset ?? 0,
                 nodeIndexes: indexes,
                 nodePubKeys: TorusNodePubModelToINodePub(nodes: nodePubKeys),
-                privateKey: finalPrivateKey!
+                privateKey: try KeyUtils.generateSecret(),
+                withNonce: !legacyWithoutOneKey
             )
-        }
-
-        var isImportShareReq = false
-        var importedShareCount = 0
-        if !finalImportedShares.isEmpty {
-            if finalImportedShares.count != endpoints.count {
-                throw TorusUtilError.importShareFailed
-            }
-            isImportShareReq = true
-            importedShareCount = finalImportedShares.count
         }
 
         var nodeSigs: [CommitmentRequestResult] = []
+        var isExistingKey = false
         if checkCommitment {
-            var params = CommitmentRequestParams(messageprefix: "mug00", tokencommitment: tokenCommitment, temppubx: pubX, temppuby: pubY, verifieridentifier: verifier, timestamp: String(BigUInt(trunc(Double((serverTimeOffset ?? 0) + Int(Date().timeIntervalSince1970)))), radix: 16))
-            params.keytype = keyType
-            params.verifier_id = verifierParams.verifier_id
-            params.extended_verifier_id = verifierParams.extended_verifier_id
-
-            let jsonRPCRequest = JRPCRequest(
-                method: JRPC_METHODS.COMMITMENT_REQUEST,
-                params: params
+            nodeSigs = try await commitmentRequest(
+                idToken: idToken,
+                endpoints: endpoints,
+                indexes: indexes,
+                canGenerateShares: canGenerateShares,
+                keyType: keyType,
+                verifier: verifier,
+                verifierParams: verifierParams,
+                pubKeyX: pubX,
+                pubKeyY: pubY,
+                serverTimeOffset: serverTimeOffset,
+                hasImportedShares: !finalImportedShares.isEmpty,
+                overrideExistingKey: overrideExistingKey
             )
-
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = .sortedKeys
-            let rpcdata = try encoder.encode(jsonRPCRequest)
-
-            nodeSigs = try await withThrowingTaskGroup(of: JRPCResponse?.self, returning: [CommitmentRequestResult].self) { group -> [CommitmentRequestResult] in
-                let minRequiredCommitmments = Int(trunc(Double(endpoints.count * 3 / 4) + 1))
-                var received: Int = 0
-                for endpoint in endpoints {
-                    group.addTask {
-                        do {
-                            var request = try MetadataUtils.makeUrlRequest(url: endpoint)
-                            request.httpBody = rpcdata
-                            let val = try await URLSession(configuration: .default).data(for: request)
-                            let decoded = try JSONDecoder().decode(JRPCResponse<CommitmentRequestResult>.self, from: val.0)
-                            return decoded
-                        } catch {
-                            return nil
-                        }
-                    }
-                }
-                var collected = [CommitmentRequestResult]()
-                for try await value in group {
-                    if value != nil && value?.error == nil {
-                        collected.append(value!.result!)
-                        received += 1
-                        if !isImportShareReq, received >= minRequiredCommitmments {
-                            group.cancelAll()
-                        }
-                    } else if isImportShareReq {
-                        // cannot continue, all must pass for import
-                        group.cancelAll()
-                    }
-                }
-                return collected
-            }
-        }
-
-        if !callerImportedShares, !useDkg, checkCommitment {
-            let existingPublicKey = try thresholdSame(
-                arr: nodeSigs.compactMap(\.pub_key_x),
+            // if user's account already
+            isExistingKey = try thresholdSame(
+                arr: nodeSigs.compactMap(\.pub_key_x).filter({ !$0.isEmpty }),
                 threshold: threshold
+            ) != nil
+        } else if !overrideExistingKey {
+            // in case not allowed to override existing key for import request, check if key exists
+            isExistingKey = try await hasExistingKey(
+                endpoints: endpoints,
+                verifier: verifier,
+                verifierId: verifierParams.verifier_id,
+                keyType: keyType
             )
-            if existingPublicKey != nil {
-                isImportShareReq = false
-                importedShareCount = 0
-                finalPrivateKey = nil
-            }
-        } else if !callerImportedShares, !useDkg, !checkCommitment,
-                  try await hasExistingKey(
-                      endpoints: endpoints,
-                      verifier: verifier,
-                      verifierId: verifierParams.verifier_id,
-                      keyType: keyType
-                  )
-        {
-            isImportShareReq = false
-            importedShareCount = 0
-            finalPrivateKey = nil
         }
 
-        if checkCommitment && importedShareCount > 0 && nodeSigs.count != endpoints.count {
+        let canImportedShares = overrideExistingKey || !isExistingKey
+        if canImportedShares && finalImportedShares.isEmpty {
+            throw TorusUtilError.runtime("nodePubkeys and indexes are required to create a new key")
+        }
+        // a v1 import splits the key itself and stores no nonce
+        let isV1Import = canImportedShares && legacyWithoutOneKey
+
+        if checkCommitment && canImportedShares && nodeSigs.count != endpoints.count {
             throw TorusUtilError.commitmentRequestFailed
         }
 
@@ -287,12 +261,10 @@ internal class NodeUtils {
 
         let sessionExpiry = extraParams.session_token_exp_second
 
-        var shareImportSuccess = false
-
         var shareResponses = [ShareRequestResult]()
         var thresholdPublicKey: KeyAssignment.PublicKey?
 
-        if isImportShareReq {
+        if canImportedShares {
             var importedItems: [ShareRequestParams.ShareRequestItem] = []
             for j in 0 ..< endpoints.count {
                 let importShare = finalImportedShares[j]
@@ -350,17 +322,13 @@ internal class NodeUtils {
             let rpcdata = try encoder.encode(jsonRPCRequest)
             var request = try MetadataUtils.makeUrlRequest(url: endpoints[Int(try getProxyCoordinatorEndpointIndex(endpoints: endpoints, verifier: verifier, verifierId: verifierParams.verifier_id))])
             request.httpBody = rpcdata
-            let val = try await URLSession(configuration: .default).data(for: request)
+            let val = try await session.data(for: request)
             let decoded = try JSONDecoder().decode(JRPCResponse<[ShareRequestResult]>.self, from: val.0)
-            if decoded.error == nil {
-                shareImportSuccess = true
-            }
-
-            if isImportShareReq && !shareImportSuccess {
+            guard decoded.error == nil, let result = decoded.result else {
                 throw TorusUtilError.importShareFailed
             }
 
-            shareResponses = decoded.result!
+            shareResponses = result
 
             let pubkeys = shareResponses.filter({ $0.keys.count > 0 }).map { $0.keys[0].publicKey }
 
@@ -409,7 +377,7 @@ internal class NodeUtils {
                             let rpcdata = try encoder.encode(jsonRPCRequest)
                             var request = try MetadataUtils.makeUrlRequest(url: endpoints[i])
                             request.httpBody = rpcdata
-                            let val = try await URLSession(configuration: .default).data(for: request)
+                            let val = try await session.data(for: request)
                             let decoded = try JSONDecoder().decode(JRPCResponse<ShareRequestResult>.self, from: val.0)
                             return decoded
                         } catch {
@@ -424,14 +392,22 @@ internal class NodeUtils {
                 for try await value in group {
                     collected.append(value)
 
-                    shareResponses = collected.filter({ $0 != nil && $0!.result != nil }).map({ $0!.result! })
+                    shareResponses = collected.filter({ $0 != nil && $0!.error == nil && $0!.result != nil }).map({ $0!.result! })
 
                     let pubkeys = shareResponses.filter({ $0.keys.count > 0 }).map { $0.keys[0].publicKey }
 
                     thresholdPublicKey = try thresholdSame(arr: pubkeys, threshold: threshold)
 
-                    if thresholdPublicKey != nil {
-                        group.cancelAll()
+                    if let thresholdPublicKey {
+                        // keep reading node responses until one of them carries the nonce
+                        if verifierParams.extended_verifier_id != nil || selectThresholdNonce(
+                            shareResponses,
+                            thresholdPublicKey: thresholdPublicKey,
+                            isNewKey: isNewKeyResponse(shareResponses, thresholdPublicKey: thresholdPublicKey) && !isV1Import
+                        ) != nil {
+                            group.cancelAll()
+                            break
+                        }
                     }
                 }
 
@@ -439,19 +415,14 @@ internal class NodeUtils {
             }
         }
 
-        if thresholdPublicKey == nil {
+        guard let thresholdPublicKey else {
             throw TorusUtilError.retrieveOrImportShareError("invalid result from nodes, threshold number of public key results are not matching, please check configuration")
         }
 
-        for item in shareResponses {
-            if thresholdNonceData == nil && verifierParams.extended_verifier_id == nil {
-                let currentPubKeyX = item.keys[0].publicKey.X.addLeading0sForLength64().lowercased()
-                let thesholdPubKeyX = thresholdPublicKey!.X.addLeading0sForLength64().lowercased()
-                let pubNonce: PubNonce? = item.keys[0].nonceData?.pubNonce
-                if pubNonce != nil && currentPubKeyX == thesholdPubKeyX {
-                    thresholdNonceData = item.keys[0].nonceData
-                }
-            }
+        if verifierParams.extended_verifier_id == nil {
+            // a v1 import stores no nonce, so its empty v1 answer is final
+            let isNewKey = isNewKeyResponse(shareResponses, thresholdPublicKey: thresholdPublicKey)
+            thresholdNonceData = selectThresholdNonce(shareResponses, thresholdPublicKey: thresholdPublicKey, isNewKey: isNewKey && !isV1Import)
         }
 
         var serverTimeOffsets: [String] = []
@@ -462,19 +433,11 @@ internal class NodeUtils {
 
         let serverTimeOffsetResponse: Int = serverTimeOffset ?? calculateMedian(arr: serverOffsetTimes)
 
-        let hasUsablePublicNonce = thresholdNonceData?.pubNonce.map {
-            !$0.x.isEmpty && !$0.y.isEmpty
-        } ?? false
-        if !hasUsablePublicNonce && verifierParams.extended_verifier_id == nil && !TorusUtils.isLegacyNetworkRouteMap(network: network) {
-            let metadataNonce = try await MetadataUtils.getOrSetSapphireMetadataNonce(metadataHost: legacyMetadataHost, network: network, X: thresholdPublicKey!.X, Y: thresholdPublicKey!.Y, serverTimeOffset: serverTimeOffsetResponse, getOnly: false, keyType: keyType)
-            thresholdNonceData = metadataNonce
-        }
+        let thresholdReqCount = canImportedShares ? endpoints.count : threshold
 
-        let thresholdReqCount = isImportShareReq ? endpoints.count : threshold
-
-        // Invert comparision to return error early
-        if !(shareResponses.count >= thresholdReqCount && thresholdPublicKey != nil && (thresholdNonceData != nil || verifierParams.extended_verifier_id != nil || TorusUtils.isLegacyNetworkRouteMap(network: network))) {
-            throw TorusUtilError.retrieveOrImportShareError("invalid result from nodes, threshold number of public key results are not matching")
+        // the nonce must come from the nodes, except for an extended verifier id
+        if !(shareResponses.count >= thresholdReqCount && (thresholdNonceData != nil || verifierParams.extended_verifier_id != nil)) {
+            throw TorusUtilError.retrieveOrImportShareError("Invalid results, threshold pub key: \(thresholdPublicKey.X), nonce data found: \(thresholdNonceData != nil), extended verifierId: \(verifierParams.extended_verifier_id ?? "")")
         }
 
         var shares: [String?] = []
@@ -482,11 +445,8 @@ internal class NodeUtils {
         var sessionTokens: [String?] = []
         var nodeIndexes: [Int?] = []
         var sessionTokenDatas: [SessionToken?] = []
-        var isNewKeys: [IsNewKeyResponse] = []
 
         for item in shareResponses {
-            isNewKeys.append(IsNewKeyResponse(isNewKey: item.isNewKey == "true", publicKeyX: item.keys.first?.publicKey.X ?? ""))
-
             if !item.sessionTokenSigs.isEmpty {
                 if !item.sessionTokenSigMetadata.isEmpty {
                     let decrypted = try MetadataUtils.decryptNodeData(eciesData: item.sessionTokenSigMetadata[0], ciphertextHex: item.sessionTokenSigs[0], privKey: sessionAuthKeySerialized)
@@ -578,8 +538,8 @@ internal class NodeUtils {
             let decryptedPoint = try KeyUtils.publicPoint(privateKey: derivedPrivateKey!, keyType: keyType)
             let decryptedPubKeyX = String(decryptedPoint.x, radix: 16).addLeading0sForLength64()
             let decryptedPubKeyY = String(decryptedPoint.y, radix: 16).addLeading0sForLength64()
-            let thresholdPubKeyX = thresholdPublicKey!.X.addLeading0sForLength64().lowercased()
-            let thresholdPubKeyY = thresholdPublicKey!.Y.addLeading0sForLength64().lowercased()
+            let thresholdPubKeyX = thresholdPublicKey.X.addLeading0sForLength64().lowercased()
+            let thresholdPubKeyY = thresholdPublicKey.Y.addLeading0sForLength64().lowercased()
             if decryptedPubKeyX.lowercased() == thresholdPubKeyX && decryptedPubKeyY.lowercased() == thresholdPubKeyY {
                 privateKey = derivedPrivateKey
                 break
@@ -590,83 +550,58 @@ internal class NodeUtils {
             throw TorusUtilError.privateKeyDeriveFailed
         }
 
-        var isNewKey = false;
-        for item in isNewKeys {
-            if (item.isNewKey && item.publicKeyX.lowercased() == thresholdPublicKey!.X.lowercased()) {
-                isNewKey = true
-            }
-        }
-
         let oAuthKey = privateKey!
         let oAuthPoint = try KeyUtils.publicPoint(privateKey: oAuthKey, keyType: keyType)
         let oAuthPublicKeyX = String(oAuthPoint.x, radix: 16).addLeading0sForLength64()
         let oAuthPublicKeyY = String(oAuthPoint.y, radix: 16).addLeading0sForLength64()
+        let order = KeyUtils.getOrderOfCurve(keyType)
         var metadataNonce = BigInt(thresholdNonceData?.nonce?.addLeading0sForLength64() ?? "0", radix: 16) ?? BigInt(0)
-        var finalPubKey: String?
+        let finalPoint: Point
         var pubNonce: PubNonce?
         var typeOfUser: UserType = .v1
+        // extended_verifier_id is only exception for torus-test-health verifier
+        // otherwise extended verifier id should not even return shares.
         if verifierParams.extended_verifier_id != nil {
             typeOfUser = .v2
-            finalPubKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: oAuthPublicKeyX, pubKeyY: oAuthPublicKeyY)
-        } else if TorusUtils.isLegacyNetworkRouteMap(network: network) {
-            if enableOneKey {
-                let nonce = try await MetadataUtils.getOrSetNonce(legacyMetadataHost: legacyMetadataHost, serverTimeOffset: serverTimeOffsetResponse, X: thresholdPublicKey!.X, Y: thresholdPublicKey!.Y, privateKey: oAuthKey, getOnly: !isNewKey)
-                metadataNonce = BigInt(nonce.nonce?.addLeading0sForLength64() ?? "0", radix: 16) ?? BigInt(0)
-                typeOfUser = UserType(rawValue: nonce.typeOfUser?.lowercased() ?? "v1")!
-                if typeOfUser == .v2 {
-                    pubNonce = nonce.pubNonce
-                    let publicNonce = KeyUtils.getPublicKeyFromCoords(pubKeyX: pubNonce!.x, pubKeyY: pubNonce!.y)
-                    let oAuthPublicKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: oAuthPublicKeyX, pubKeyY: oAuthPublicKeyY)
-                    finalPubKey = try KeyUtils.combinePublicKeys(keys: [oAuthPublicKey, publicNonce])
-                } else {
-                    typeOfUser = .v1
-                    metadataNonce = BigInt(try await MetadataUtils.getMetadata(legacyMetadataHost: legacyMetadataHost, params: GetMetadataParams(pub_key_X: oAuthPublicKeyX, pub_key_Y: oAuthPublicKeyY)))
-                    let privateKeyWithNonce = (BigInt(oAuthKey.addLeading0sForLength64(), radix: 16)! + BigInt(metadataNonce)).modulus(KeyUtils.getOrderOfCurve())
-                    finalPubKey = try SecretKey(hex: privateKeyWithNonce.magnitude.serialize().hexString.addLeading0sForLength64()).toPublic().serialize(compressed: false)
-                }
-            } else {
-                typeOfUser = .v1
-                metadataNonce = BigInt(try await MetadataUtils.getMetadata(legacyMetadataHost: legacyMetadataHost, params: GetMetadataParams(pub_key_X: oAuthPublicKeyX, pub_key_Y: oAuthPublicKeyY)))
-                let privateKeyWithNonce = (BigInt(oAuthKey.addLeading0sForLength64(), radix: 16)! + BigInt(metadataNonce)).modulus(KeyUtils.getOrderOfCurve())
-                finalPubKey = try SecretKey(hex: privateKeyWithNonce.magnitude.serialize().hexString.addLeading0sForLength64()).toPublic().serialize(compressed: false)
-            }
+            // for tss key no need to add pub nonce
+            finalPoint = oAuthPoint
+        } else if thresholdNonceData?.typeOfUser == UserType.v1.rawValue {
+            typeOfUser = .v1
+            let privateKeyWithNonce = ((BigInt(oAuthKey.addLeading0sForLength64(), radix: 16) ?? BigInt(0)) + metadataNonce).modulus(order)
+            finalPoint = try KeyUtils.publicPoint(privateKey: privateKeyWithNonce.magnitude.serialize().hexString.addLeading0sForLength64(), keyType: keyType)
+        } else if legacyWithoutOneKey {
+            // a legacy dApp without OneKey ignores a v2 nonce
+            typeOfUser = .v1
+            metadataNonce = BigInt(0)
+            finalPoint = oAuthPoint
         } else {
-            typeOfUser = .v2
-            let oAuthPubKey = KeyUtils.getPublicKeyFromCoords(pubKeyX: oAuthPublicKeyX, pubKeyY: oAuthPublicKeyY)
-            finalPubKey = oAuthPubKey
-            if thresholdNonceData!.pubNonce != nil && !(thresholdNonceData!.pubNonce!.x.isEmpty || thresholdNonceData!.pubNonce!.y.isEmpty) {
-                let pubNonceKey = thresholdNonceData!.pubNonce!
-                let combined = try KeyUtils.combinePublicPoints(
-                    keyType: keyType,
-                    first: oAuthPoint,
-                    second: try Point(x: pubNonceKey.x, y: pubNonceKey.y)
-                )
-                finalPubKey = KeyUtils.getPublicKeyFromCoords(
-                    pubKeyX: String(combined.x, radix: 16),
-                    pubKeyY: String(combined.y, radix: 16)
-                )
-                pubNonce = PubNonce(x: thresholdNonceData!.pubNonce!.x, y: thresholdNonceData!.pubNonce!.y)
-            } else {
+            guard let nonceKey = thresholdNonceData?.pubNonce, !nonceKey.x.isEmpty, !nonceKey.y.isEmpty else {
                 throw TorusUtilError.pubNonceMissing
             }
-        }
-
-        if finalPubKey == nil {
-            throw TorusUtilError.retrieveOrImportShareError("Invalid public key, this might be a bug, please report this to web3auth team")
+            typeOfUser = .v2
+            finalPoint = try KeyUtils.combinePublicPoints(
+                keyType: keyType,
+                first: oAuthPoint,
+                second: try Point(x: nonceKey.x, y: nonceKey.y)
+            )
+            pubNonce = PubNonce(x: nonceKey.x, y: nonceKey.y)
         }
 
         let oAuthKeyAddress = try KeyUtils.generateAddressFromPubKey(keyType: keyType, publicKeyX: oAuthPublicKeyX, publicKeyY: oAuthPublicKeyY)
 
-        let (finalPubX, finalPubY) = try KeyUtils.getPublicKeyCoords(pubKey: finalPubKey!)
+        let finalPubX = String(finalPoint.x, radix: 16).addLeading0sForLength64()
+        let finalPubY = String(finalPoint.y, radix: 16).addLeading0sForLength64()
+        // deriving address from pub key coz pubkey is always available
+        // but finalPrivKey won't be available for v2 user upgraded to 2/n
         let finalEvmAddress = try KeyUtils.generateAddressFromPubKey(keyType: keyType, publicKeyX: finalPubX, publicKeyY: finalPubY)
 
         var finalPrivKey = ""
         if typeOfUser == .v1 || (typeOfUser == .v2 && metadataNonce > BigInt(0)) {
             let privateKeyWithNonce = (
                 (BigInt(oAuthKey.addLeading0sForLength64(), radix: 16) ?? BigInt(0)) + metadataNonce
-            ).modulus(KeyUtils.getOrderOfCurve(keyType))
+            ).modulus(order)
             if keyType == .ed25519 {
-                guard let encryptedSeed = thresholdNonceData?.seed else {
+                guard let encryptedSeed = thresholdNonceData?.seed, !encryptedSeed.isEmpty else {
                     throw TorusUtilError.runtime("Invalid data, seed data is missing for ed25519 key")
                 }
                 finalPrivKey = try MetadataUtils.decryptSeedData(
@@ -678,15 +613,6 @@ internal class NodeUtils {
             }
         }
 
-        // This is a sanity check to make doubly sure we are returning the correct private key after importing a share
-        if callerImportedShares {
-            if finalPrivateKey == nil {
-                throw TorusUtilError.importShareFailed
-            } else if finalPrivKey != finalPrivateKey!.addLeading0sForLength64() {
-                throw TorusUtilError.importShareFailed
-            }
-        }
-        
         var isUpgraded: Bool?
         if typeOfUser == .v2 {
             isUpgraded = metadataNonce == BigInt(0)
@@ -739,6 +665,98 @@ internal class NodeUtils {
         )
     }
 
+    private static func commitmentRequest(
+        idToken: String,
+        endpoints: [String],
+        indexes: [BigUInt],
+        canGenerateShares: Bool,
+        keyType: TorusKeyType,
+        verifier: String,
+        verifierParams: VerifierParams,
+        pubKeyX: String,
+        pubKeyY: String,
+        serverTimeOffset: Int?,
+        hasImportedShares: Bool,
+        overrideExistingKey: Bool
+    ) async throws -> [CommitmentRequestResult] {
+        let tokenCommitment = try KeyUtils.keccak256Data(idToken)
+        let threeFourthsThreshold = Int(trunc(Double(endpoints.count * 3 / 4) + 1))
+        let halfThreshold = Int(trunc(Double((endpoints.count / 2) + 1)))
+
+        var params = CommitmentRequestParams(messageprefix: "mug00", tokencommitment: tokenCommitment, temppubx: pubKeyX, temppuby: pubKeyY, verifieridentifier: verifier, timestamp: String(BigUInt(trunc(Double((serverTimeOffset ?? 0) + Int(Date().timeIntervalSince1970)))), radix: 16))
+        params.keytype = keyType
+        params.verifier_id = verifierParams.verifier_id
+        params.extended_verifier_id = verifierParams.extended_verifier_id
+
+        let jsonRPCRequest = JRPCRequest(
+            method: JRPC_METHODS.COMMITMENT_REQUEST,
+            params: params
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let rpcdata = try encoder.encode(jsonRPCRequest)
+
+        // the proxy node response is required only when the flow can import shares;
+        // without node details there are no indexes to look it up by
+        let requiredNodeIndex: String? = hasImportedShares && canGenerateShares
+            ? String(indexes[Int(try getProxyCoordinatorEndpointIndex(endpoints: endpoints, verifier: verifier, verifierId: verifierParams.verifier_id))])
+            : nil
+
+        let (nodeSigs, satisfied) = try await withThrowingTaskGroup(of: JRPCResponse<CommitmentRequestResult>?.self, returning: ([CommitmentRequestResult], Bool).self) { group -> ([CommitmentRequestResult], Bool) in
+            for endpoint in endpoints {
+                group.addTask {
+                    do {
+                        var request = try MetadataUtils.makeUrlRequest(url: endpoint)
+                        request.httpBody = rpcdata
+                        let val = try await session.data(for: request)
+                        return try JSONDecoder().decode(JRPCResponse<CommitmentRequestResult>.self, from: val.0)
+                    } catch {
+                        return nil
+                    }
+                }
+            }
+            var collected = [CommitmentRequestResult]()
+            for try await value in group {
+                guard let value, value.error == nil, let result = value.result else {
+                    continue
+                }
+                collected.append(result)
+
+                var done = false
+                if hasImportedShares {
+                    // for new imported keys registration we need to wait for all nodes to agree on commitment
+                    // for fetching existing imported keys we can rely on threshold nodes commitment
+                    if overrideExistingKey {
+                        done = collected.count == endpoints.count
+                    } else if collected.count >= threeFourthsThreshold {
+                        let existingPubKey = try thresholdSame(
+                            arr: collected.compactMap(\.pub_key_x).filter({ !$0.isEmpty }),
+                            threshold: halfThreshold
+                        )
+                        // if not a existing key we need to wait for nodes to agree on commitment
+                        if existingPubKey != nil || collected.count == endpoints.count {
+                            done = requiredNodeIndex.map({ index in collected.contains(where: { $0.nodeindex == index }) }) ?? true
+                        }
+                    }
+                } else {
+                    done = collected.count >= threeFourthsThreshold
+                }
+
+                if done {
+                    group.cancelAll()
+                    return (collected, true)
+                }
+            }
+            return (collected, false)
+        }
+
+        if !satisfied {
+            throw TorusUtilError.commitmentRequestFailed
+        }
+        return nodeSigs
+    }
+
     private struct VerifierLookupParams: Codable {
         let verifier: String
         let verifier_id: String
@@ -768,7 +786,7 @@ internal class NodeUtils {
                     do {
                         var urlRequest = try MetadataUtils.makeUrlRequest(url: endpoint)
                         urlRequest.httpBody = body
-                        let (data, _) = try await URLSession.shared.data(for: urlRequest)
+                        let (data, _) = try await session.data(for: urlRequest)
                         return try JSONDecoder().decode(JRPCResponse<VerifierLookupResponse>.self, from: data)
                     } catch {
                         return nil

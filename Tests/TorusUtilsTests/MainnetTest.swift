@@ -127,7 +127,7 @@ class MainnetTests: XCTestCase {
         let jwt = try! generateIdToken(email: verifierID)
         let verifierParams = VerifierParams(verifier_id: verifierID)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertEqual(data.finalKeyData.evmAddress, "0x90A926b698047b4A87265ba1E9D8b512E8489067")
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
@@ -156,7 +156,7 @@ class MainnetTests: XCTestCase {
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
 
         let verifierParams = VerifierParams(verifier_id: verifierID, sub_verifier_ids: [TORUS_TEST_VERIFIER], verify_params: [VerifyParams(verifier_id: verifierID, idtoken: jwt)])
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken))
 
         XCTAssertEqual(data.finalKeyData.evmAddress, "0x621a4d458cFd345dAE831D9E756F10cC40A50381")
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)

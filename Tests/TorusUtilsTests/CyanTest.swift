@@ -120,7 +120,7 @@ class CyanTest: XCTestCase {
         let jwt = try! generateIdToken(email: verifierID)
         let verifierParams = VerifierParams(verifier_id: verifierID)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: jwt)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: jwt))
 
         XCTAssertEqual(data.finalKeyData.evmAddress, "0xC615aA03Dd8C9b2dc6F7c43cBDfF2c34bBa47Ec9")
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
@@ -148,7 +148,7 @@ class CyanTest: XCTestCase {
         let hashedIDToken = try KeyUtils.keccak256Data(jwt)
         let nodeDetails = try await fnd.getNodeDetails(verifier: verifier, verifierID: verifierID)
 
-        let data = try await torus.retrieveShares(endpoints: nodeDetails.getTorusNodeEndpoints(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken)
+        let data = try await torus.retrieveShares(params: RetrieveSharesParams(endpoints: nodeDetails.getTorusNodeEndpoints(), indexes: nodeDetails.getTorusIndexes(), nodePubKeys: nodeDetails.getTorusNodePub(), verifier: verifier, verifierParams: verifierParams, idToken: hashedIDToken))
 
         XCTAssertEqual(data.finalKeyData.evmAddress, "0x34117FDFEFBf1ad2DFA6d4c43804E6C710a6fB04")
         XCTAssertLessThan(data.metadata.serverTimeOffset, 20)
