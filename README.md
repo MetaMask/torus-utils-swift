@@ -117,6 +117,12 @@ key flow") and is a breaking release:
   `RetrieveSharesParams`. The deprecated `retrieveShares(endpoints:...)` can
   only log in existing users, and throws
   `nodePubkeys and indexes are required to create a new key` for new ones.
+- `importPrivateKey` throws `Invalid private key length for given <keyType> key`
+  unless the key is 32 bytes.
+- A `serverTimeOffset` of `0` means unset, so `metadata.serverTimeOffset` is the
+  median offset reported by the nodes.
+- The Citadel allow call sends `x-api-key` only when a custom key is set with
+  `setApiKey(apiKey:)`.
 
 ## Migrating from 10.x to 11.0
 

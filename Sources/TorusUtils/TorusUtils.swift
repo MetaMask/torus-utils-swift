@@ -134,7 +134,8 @@ public class TorusUtils {
                 keyType: keyType,
                 checkCommitment: params.checkCommitment,
                 recordId: recordId,
-                source: source
+                source: source,
+                apiKey: apiKey
             )
 
             if callerSuppliedRecordId {
@@ -204,7 +205,8 @@ public class TorusUtils {
             keyType: keyType,
             checkCommitment: true,
             recordId: CitadelUtils.generateRecordId(),
-            source: source
+            source: source,
+            apiKey: apiKey
         )
     }
 
@@ -247,6 +249,11 @@ public class TorusUtils {
             throw TorusUtilError.runtime("Length of endpoints must be the same as length of nodePubKeys")
         }
 
+        let privateKeyHex = params.newPrivateKey.addLeading0sForLength64()
+        if privateKeyHex.count != 64 || Data(hex: privateKeyHex).count != 32 {
+            throw TorusUtilError.runtime("Invalid private key length for given \(keyType.rawValue) key")
+        }
+
         // a legacy dApp without OneKey uses the key itself, so it imports the key with no nonce
         let withNonce = !network.isLegacy || enableOneKey
         let sharesData = try KeyUtils.generateShares(
@@ -257,6 +264,13 @@ public class TorusUtils {
             privateKey: params.newPrivateKey,
             withNonce: withNonce
         )
+
+        if keyType == .ed25519 {
+            let importedPubKey = Ed25519Utils.encode(Ed25519Utils.point(fromScalar: try Ed25519Utils.scalar(fromSeed: Data(hex: privateKeyHex))))
+            guard let firstShare = sharesData.first, Ed25519Utils.encode(firstShare.final_user_point) == importedPubKey else {
+                throw TorusUtilError.runtime("invalid shares data for ed25519 key, public key is not matching after generating shares")
+            }
+        }
 
         if params.extraParams.session_token_exp_second == nil {
             params.extraParams.session_token_exp_second = sessionTime
@@ -280,7 +294,8 @@ public class TorusUtils {
             keyType: keyType,
             checkCommitment: params.checkCommitment,
             recordId: params.recordId ?? CitadelUtils.generateRecordId(),
-            source: source
+            source: source,
+            apiKey: apiKey
         )
         try TorusUtils.assertImportedKey(torusKey: torusKey, importedPrivateKey: params.newPrivateKey)
         return torusKey
@@ -324,7 +339,7 @@ public class TorusUtils {
     public func reportSignerAllow(params: CitadelAllowParams) {
         Task {
             do {
-                try await CitadelUtils.callAllowApi(params: params)
+                try await CitadelUtils.callAllowApi(params: params, apiKey: apiKey)
             } catch {
                 os_log(
                     "Failed to log Citadel allow API: %{public}@",
@@ -440,7 +455,8 @@ public class TorusUtils {
         var typeOfUser: UserType = nonceResult?.typeOfUser == UserType.v1.rawValue ? .v1 : .v2
         let finalPoint: Point
 
-        let finalServerTimeOffset = serverTimeOffset ?? keyAssignResult.serverTimeOffset
+        // 0 means unset, as in torus.js
+        let finalServerTimeOffset = (serverTimeOffset ?? 0) != 0 ? serverTimeOffset! : keyAssignResult.serverTimeOffset
 
         if extendedVerifierId != nil {
             // for tss key no need to add pub nonce

@@ -163,7 +163,8 @@ internal class NodeUtils {
         keyType: TorusKeyType,
         checkCommitment: Bool,
         recordId: String,
-        source: String?
+        source: String?,
+        apiKey: String? = nil
     ) async throws -> TorusKey {
         let threshold = Int(trunc(Double((endpoints.count / 2) + 1)))
         // a legacy dApp without OneKey uses the oAuth key itself, so its new keys store no nonce
@@ -180,7 +181,7 @@ internal class NodeUtils {
                 source: source,
                 oauthInitiated: .set,
                 oauthCompleted: .set
-            ))
+            ), apiKey: apiKey)
         } catch {
             os_log(
                 "Failed to log initial Citadel allow API: %{public}@",
@@ -238,12 +239,16 @@ internal class NodeUtils {
             ) != nil
         } else if !overrideExistingKey {
             // in case not allowed to override existing key for import request, check if key exists
-            isExistingKey = try await hasExistingKey(
+            let lookup = try await verifierLookup(
                 endpoints: endpoints,
                 verifier: verifier,
                 verifierId: verifierParams.verifier_id,
                 keyType: keyType
             )
+            if let errorResult = lookup.errorResult, !errorResult.data.contains("Verifier + VerifierID has not yet been assigned") {
+                throw TorusUtilError.runtime("node results do not match at first lookup \(errorResult.message), \(errorResult.data)")
+            }
+            isExistingKey = lookup.keyResult?.keys.first != nil
         }
 
         let canImportedShares = overrideExistingKey || !isExistingKey
@@ -431,7 +436,8 @@ internal class NodeUtils {
         }
         let serverOffsetTimes = serverTimeOffsets.map({ Int($0) ?? 0 })
 
-        let serverTimeOffsetResponse: Int = serverTimeOffset ?? calculateMedian(arr: serverOffsetTimes)
+        // 0 means unset, as in torus.js
+        let serverTimeOffsetResponse: Int = (serverTimeOffset ?? 0) != 0 ? serverTimeOffset! : calculateMedian(arr: serverOffsetTimes)
 
         let thresholdReqCount = canImportedShares ? endpoints.count : threshold
 
@@ -629,6 +635,12 @@ internal class NodeUtils {
                 privateKey: postboxPrivateKey,
                 keyType: .secp256k1
             )
+            guard let signerX = thresholdPublicKey.SignerX, let signerY = thresholdPublicKey.SignerY,
+                  signerX.addLeading0sForLength64().lowercased() == String(postboxPoint.x, radix: 16).addLeading0sForLength64(),
+                  signerY.addLeading0sForLength64().lowercased() == String(postboxPoint.y, radix: 16).addLeading0sForLength64()
+            else {
+                throw TorusUtilError.runtime("Invalid postbox key")
+            }
         } else {
             postboxPrivateKey = oAuthKey
             postboxPoint = oAuthPoint
@@ -709,7 +721,9 @@ internal class NodeUtils {
                     do {
                         var request = try MetadataUtils.makeUrlRequest(url: endpoint)
                         request.httpBody = rpcdata
-                        let val = try await session.data(for: request)
+                        let val = try await retryCommitment(maxRetries: 4) {
+                            try await session.data(for: request)
+                        }
                         return try JSONDecoder().decode(JRPCResponse<CommitmentRequestResult>.self, from: val.0)
                     } catch {
                         return nil
@@ -764,12 +778,33 @@ internal class NodeUtils {
         let client_time: String
     }
 
-    private static func hasExistingKey(
+    private struct VerifierLookupKeys: Codable {
+        struct Key: Codable {
+            let pub_key_X: String
+            let pub_key_Y: String
+            let address: String?
+        }
+
+        let keys: [Key]
+
+        init(keys: [Key]) {
+            self.keys = keys
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            keys = try container.decodeIfPresent([Key].self, forKey: .keys) ?? []
+        }
+    }
+
+    /// Resolves once threshold nodes agree on the lookup keys or on an error, and throws otherwise.
+    private static func verifierLookup(
         endpoints: [String],
         verifier: String,
         verifierId: String,
         keyType: TorusKeyType
-    ) async throws -> Bool {
+    ) async throws -> (keyResult: VerifierLookupKeys?, errorResult: ErrorMessage?) {
+        let threshold = endpoints.count / 2 + 1
         let request = JRPCRequest(
             method: "VerifierLookupRequest",
             params: VerifierLookupParams(
@@ -780,28 +815,64 @@ internal class NodeUtils {
             )
         )
         let body = try JSONEncoder().encode(request)
-        let responses = await withTaskGroup(of: JRPCResponse<VerifierLookupResponse>?.self) { group in
+        let result = try await withThrowingTaskGroup(of: JRPCResponse<VerifierLookupKeys>?.self, returning: (VerifierLookupKeys?, ErrorMessage?)?.self) { group in
             for endpoint in endpoints {
                 group.addTask {
                     do {
                         var urlRequest = try MetadataUtils.makeUrlRequest(url: endpoint)
                         urlRequest.httpBody = body
                         let (data, _) = try await session.data(for: urlRequest)
-                        return try JSONDecoder().decode(JRPCResponse<VerifierLookupResponse>.self, from: data)
+                        return try JSONDecoder().decode(JRPCResponse<VerifierLookupKeys>.self, from: data)
                     } catch {
                         return nil
                     }
                 }
             }
-            var values = [JRPCResponse<VerifierLookupResponse>]()
-            for await response in group {
-                if let response {
-                    values.append(response)
+            var errors = [ErrorMessage]()
+            var lookups = [VerifierLookupKeys]()
+            for try await response in group {
+                guard let response else { continue }
+                if let error = response.error {
+                    errors.append(error)
+                } else if let result = response.result {
+                    lookups.append(VerifierLookupKeys(keys: result.keys.first.map { [$0] } ?? []))
+                }
+                let errorResult = try thresholdSame(arr: errors, threshold: threshold)
+                let keyResult = try thresholdSame(arr: lookups, threshold: threshold)
+                if keyResult != nil || errorResult != nil {
+                    group.cancelAll()
+                    return (keyResult, errorResult)
                 }
             }
-            return values
+            return nil
         }
-        let normalized = responses.compactMap(\.result).map(normalizeKeysResult)
-        return try thresholdSame(arr: normalized, threshold: endpoints.count / 2 + 1) != nil
+        guard let result else {
+            throw TorusUtilError.runtime("invalid lookup result for verifier: \(verifier), verifierId: \(verifierId)")
+        }
+        return result
     }
+
+    /// Retries network failures with backoff; any other failure is thrown at once.
+    private static func retryCommitment<T>(maxRetries: Int, _ operation: () async throws -> T) async throws -> T {
+        var retries = 0
+        while true {
+            if retries > 0 {
+                try await Task.sleep(nanoseconds: UInt64(1 << retries) * 100_000_000)
+            }
+            do {
+                return try await operation()
+            } catch let error as URLError where retries < maxRetries && !Task.isCancelled && retryableCommitmentErrors.contains(error.code) {
+                retries += 1
+            }
+        }
+    }
+
+    private static let retryableCommitmentErrors: Set<URLError.Code> = [
+        .timedOut,
+        .cannotFindHost,
+        .cannotConnectToHost,
+        .networkConnectionLost,
+        .notConnectedToInternet,
+        .dnsLookupFailed,
+    ]
 }
